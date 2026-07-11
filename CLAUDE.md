@@ -1,9 +1,17 @@
-# CLAUDE.md — Fastify Backend Template
+# CLAUDE.md — claude-remote-session
 
-A Fastify + TypeScript backend starter (SQLite via Drizzle, encryption-at-rest,
-security middleware) wired to the centralized CI/CD in
-[`s3ntin3l8/.github`](https://github.com/s3ntin3l8/.github). If you are an AI agent
-or developer working in a repo created from this template, read this first.
+A self-hosted, tiled, persistent browser dashboard for host-run AI CLI terminals
+(Claude Code, Codex, opencode, ...), built on a Fastify + TypeScript backend
+(SQLite via Drizzle, encryption-at-rest, security middleware) wired to the
+centralized CI/CD in [`s3ntin3l8/.github`](https://github.com/s3ntin3l8/.github).
+If you are an AI agent or developer working in this repo, read this first —
+and read the full design in
+[`.claude/plans/ok-i-m-thinking-of-merry-corbato.md`](.claude/plans/ok-i-m-thinking-of-merry-corbato.md)
+before touching `src/services/pty-manager.ts` or the terminal WS protocol.
+
+This file below still describes the inherited template baseline; it will be
+extended as the terminal-bridge functionality (pty-manager, WS protocol,
+dockview frontend) lands per the plan's milestones.
 
 ## First steps after creating a repo from this template
 

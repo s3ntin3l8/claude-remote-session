@@ -1,8 +1,8 @@
 {
-  "name": "node-backend-template",
-  "version": "0.1.1",
+  "name": "claude-remote-session",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Standard Fastify backend template with full CI/CD and security",
+  "description": "Self-hosted, tiled, persistent browser dashboard for host-run AI CLI terminals (Claude Code, Codex, opencode, ...)",
   "main": "dist/server.js",
   "engines": {
     "node": ">=26"

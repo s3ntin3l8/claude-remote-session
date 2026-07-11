@@ -1,8 +1,19 @@
-# Node Backend Template
+# claude-remote-session
 
-A production-ready [Fastify](https://fastify.dev/) backend template with
-TypeScript, SQLite/[Drizzle](https://orm.drizzle.team/), encryption-at-rest,
-security middleware, and full CI/CD.
+A self-hosted, tiled, persistent browser dashboard for terminals running AI
+coding CLIs (Claude Code, Codex, opencode, ...) on a remote host. Sessions run
+on the host under `dtach`, so closing the browser tab never kills them — the
+dashboard is a thin attach-client, not the process owner. See
+[`.claude/plans/ok-i-m-thinking-of-merry-corbato.md`](.claude/plans/ok-i-m-thinking-of-merry-corbato.md)
+for the full design.
+
+Built on the [Fastify](https://fastify.dev/) + TypeScript +
+SQLite/[Drizzle](https://orm.drizzle.team/) backend template, with its
+security middleware and full CI/CD.
+
+> **Status:** early build. The sections below describe the inherited template
+> baseline; they'll be rewritten as the terminal-bridge functionality lands
+> (see the plan's milestones).
 
 ## 🚀 Quick Start
 
@@ -90,11 +101,11 @@ Automated via [Release Please](https://github.com/googleapis/release-please).
 Use [Conventional Commits](https://www.conventionalcommits.org/) to trigger
 version bumps.
 
-## ✅ Using this template
+## ✅ Template setup (done)
 
-1. Set `name` in `package.json` and update this README's title/description.
-2. Update `image-name` in `.github/workflows/ci-cd.yml` and
-   `release-please.yml` to your repo.
-3. Replace `release-please-config.json` / manifest package name if needed.
-4. Generate and set a real `DB_ENCRYPTION_KEY` for any non-local environment.
-5. Replace the example `users` schema/route with your domain model.
+`package.json` name/description and this README's title were updated;
+`image-name` in the CI workflows already derives from
+`${{ github.event.repository.name }}` so no edit was needed there. A real
+`DB_ENCRYPTION_KEY` still needs generating for any non-local environment. The
+example `users` schema/route will be replaced by the project/session registry
+in Milestone 2 of the plan.
