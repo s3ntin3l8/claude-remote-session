@@ -1,12 +1,11 @@
 # Deployment
 
 These files are **templates, not live config** — nothing here is installed,
-enabled, or applied by anything in this repo or its CI. See the pivotal
-architecture decision in
-[`.claude/plans/ok-i-m-thinking-of-merry-corbato.md`](../.claude/plans/ok-i-m-thinking-of-merry-corbato.md):
-the app runs **natively on the host** under `systemd --user`, not in the
-Docker image CI builds and pushes — containerizing it would mean every
-redeploy kills every live terminal session.
+enabled, or applied by anything in this repo or its CI. The pivotal
+architecture decision: the app runs **natively on the host** under
+`systemd --user`, not in the Docker image CI builds and pushes —
+containerizing it would mean every redeploy kills every live terminal
+session.
 
 ## Files
 
