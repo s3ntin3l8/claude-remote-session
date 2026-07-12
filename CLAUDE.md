@@ -90,6 +90,13 @@ Codecov.
   sources (Node16 resolution). Prefer `import type` for type-only imports (enforced by
   ESLint).
 - **Conventional Commits** — Release Please cuts versions/changelogs from them.
+  **PR titles must also use a conventional-commit prefix** (`feat:`, `fix:`,
+  `chore:`, `docs:`, ...), not just the underlying commits: this repo squash-merges
+  PRs, and GitHub uses the **PR title** as the squashed commit's message on `main`,
+  discarding the individual commits' own prefixes. A PR titled without one (e.g.
+  "Add X") produces an unparseable commit that Release Please silently drops from
+  the changelog/version bump — this actually happened (PR #5, fixed via a
+  retroactive empty `feat:` commit rather than rewriting already-pushed history).
 - Tests live in `test/`, mirroring `src/`, and use `app.inject()`. `test/setup.ts`
   gives each test file an isolated temp SQLite DB.
 - Config is read from `app.config` (typed via the `declare module "fastify"`
