@@ -24,4 +24,4 @@ jobs:
       image-name: "s3ntin3l8/${{ github.event.repository.name }}"
       push-release: true
       release-tag: ${{ needs.release-please.outputs.tag_name }}
-    secrets: inherit
+    secrets: inherit # pragma: allowlist secret
