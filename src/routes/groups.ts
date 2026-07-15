@@ -4,6 +4,7 @@ import { groups } from "../db/schema.js";
 
 interface CreateGroupBody {
   name: string;
+  color?: string | null;
 }
 
 interface UpdateGroupBody {
@@ -21,6 +22,10 @@ const createGroupSchema = {
     additionalProperties: false,
     properties: {
       name: { type: "string", minLength: 1 },
+      // Optional so the create-group modal can set the chosen swatch in one
+      // call instead of create-then-PATCH; color remains independently
+      // settable afterward via PATCH.
+      color: { type: ["string", "null"] },
     },
   },
 };
@@ -49,7 +54,12 @@ export async function groupsRoute(app: FastifyInstance) {
     "/api/groups",
     { schema: createGroupSchema },
     async (request, reply) => {
-      const [created] = app.db.insert(groups).values({ name: request.body.name }).returning().all();
+      const { name, color } = request.body;
+      const [created] = app.db
+        .insert(groups)
+        .values({ name, ...(color !== undefined ? { color } : {}) })
+        .returning()
+        .all();
       reply.code(201);
       return created;
     },

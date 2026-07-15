@@ -37,6 +37,18 @@ describe("projects route", () => {
     await app.close();
   });
 
+  it("expands a leading ~ in cwd on create", async () => {
+    const app = await buildApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "tilde", cwd: "~/code/my-project" },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().cwd).toBe(path.join(os.homedir(), "code/my-project"));
+    await app.close();
+  });
+
   it("rejects a project missing cwd", async () => {
     const app = await buildApp();
     const res = await app.inject({
@@ -68,6 +80,93 @@ describe("projects route", () => {
     expect(deleted.statusCode).toBe(204);
 
     await app.close();
+  });
+
+  describe("PATCH /api/projects/:id", () => {
+    it("updates name and cwd", async () => {
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "before", cwd: "/tmp/before" },
+      });
+      const { id } = created.json();
+
+      const patched = await app.inject({
+        method: "PATCH",
+        url: `/api/projects/${id}`,
+        payload: { name: "after", cwd: "/tmp/after" },
+      });
+      expect(patched.statusCode).toBe(200);
+      expect(patched.json()).toMatchObject({ id, name: "after", cwd: "/tmp/after" });
+
+      await app.close();
+    });
+
+    it("expands a leading ~ in cwd on update", async () => {
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "tilde-edit", cwd: "/tmp/tilde-edit" },
+      });
+      const { id } = created.json();
+
+      const patched = await app.inject({
+        method: "PATCH",
+        url: `/api/projects/${id}`,
+        payload: { cwd: "~/code/edited-project" },
+      });
+      expect(patched.statusCode).toBe(200);
+      expect(patched.json().cwd).toBe(path.join(os.homedir(), "code/edited-project"));
+
+      await app.close();
+    });
+
+    it("supports a partial update (name only)", async () => {
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "partial-before", cwd: "/tmp/partial" },
+      });
+      const { id } = created.json();
+
+      const patched = await app.inject({
+        method: "PATCH",
+        url: `/api/projects/${id}`,
+        payload: { name: "partial-after" },
+      });
+      expect(patched.statusCode).toBe(200);
+      expect(patched.json()).toMatchObject({ name: "partial-after", cwd: "/tmp/partial" });
+
+      await app.close();
+    });
+
+    it("404s updating an unknown project", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "PATCH",
+        url: "/api/projects/999999",
+        payload: { name: "nope" },
+      });
+      expect(res.statusCode).toBe(404);
+      await app.close();
+    });
+
+    it("rejects an empty body", async () => {
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "empty-body", cwd: "/tmp/empty-body" },
+      });
+      const { id } = created.json();
+
+      const res = await app.inject({ method: "PATCH", url: `/api/projects/${id}`, payload: {} });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
   });
 
   describe("GET /api/projects/discover", () => {

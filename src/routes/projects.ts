@@ -11,6 +11,11 @@ interface CreateProjectBody {
   cwd: string;
 }
 
+interface UpdateProjectBody {
+  name?: string;
+  cwd?: string;
+}
+
 interface DiscoveredProject {
   name: string;
   cwd: string;
@@ -23,6 +28,18 @@ const createProjectSchema = {
     type: "object",
     required: ["name", "cwd"],
     additionalProperties: false,
+    properties: {
+      name: { type: "string", minLength: 1 },
+      cwd: { type: "string", minLength: 1 },
+    },
+  },
+};
+
+const updateProjectSchema = {
+  body: {
+    type: "object",
+    additionalProperties: false,
+    minProperties: 1,
     properties: {
       name: { type: "string", minLength: 1 },
       cwd: { type: "string", minLength: 1 },
@@ -137,9 +154,44 @@ export async function projectsRoute(app: FastifyInstance) {
     { schema: createProjectSchema },
     async (request, reply) => {
       const { name, cwd } = request.body;
-      const [created] = app.db.insert(projects).values({ name, cwd }).returning().all();
+      // The create-project modal's own placeholder is a literal `~/...`
+      // path (ported from the design) — expand it the same way
+      // PROJECTS_ROOTS/CRS_CONFIG_DIR already are, so a session spawned
+      // against this project's cwd doesn't fail to resolve it.
+      const [created] = app.db
+        .insert(projects)
+        .values({ name, cwd: expandHome(cwd) })
+        .returning()
+        .all();
       reply.code(201);
       return created;
+    },
+  );
+
+  // Partial update — a project's own edit modal reuses CreateProjectModal
+  // pre-filled, submitting whichever of name/cwd changed. Applies the same
+  // expandHome() tilde-expansion POST already does, so re-pointing a
+  // project at a literal `~/...` path via edit resolves the same way an
+  // initial create does, rather than silently producing an unspawnable cwd.
+  app.patch<{ Params: { id: string }; Body: UpdateProjectBody }>(
+    "/api/projects/:id",
+    { schema: updateProjectSchema },
+    async (request, reply) => {
+      const projectId = Number(request.params.id);
+      if (!Number.isInteger(projectId)) return reply.badRequest("Invalid project id");
+
+      const { name, cwd } = request.body;
+      const updated = app.db
+        .update(projects)
+        .set({
+          ...(name !== undefined ? { name } : {}),
+          ...(cwd !== undefined ? { cwd: expandHome(cwd) } : {}),
+        })
+        .where(eq(projects.id, projectId))
+        .returning()
+        .all();
+      if (updated.length === 0) return reply.notFound();
+      return updated[0];
     },
   );
 

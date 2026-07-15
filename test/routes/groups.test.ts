@@ -46,6 +46,18 @@ describe("groups route", () => {
     await app.close();
   });
 
+  it("creates a group with a color in one call", async () => {
+    const app = await buildApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/groups",
+      payload: { name: "Colored", color: "var(--p)" },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ name: "Colored", color: "var(--p)" });
+    await app.close();
+  });
+
   it("rejects a group missing name", async () => {
     const app = await buildApp();
     const res = await app.inject({ method: "POST", url: "/api/groups", payload: {} });
