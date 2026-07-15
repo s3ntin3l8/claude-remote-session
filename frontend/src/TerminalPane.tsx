@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { IDockviewPanelProps } from "dockview-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
+import { RefreshIcon, SpinnerIcon, WifiOffIcon } from "./icons.js";
 
 export interface TerminalPaneParams {
   sessionId: number;
@@ -32,6 +32,23 @@ const RECONNECT_MAX_DELAY_MS = 8000;
 // since preventDefault() on those is a silent no-op anyway.
 const TERMINAL_RESERVED_KEYS = new Set(["r", "l", "k"]);
 
+// Read directly from localStorage (same self-contained pattern as
+// store.ts's own persisted prefs) rather than threading a prop down from
+// App.tsx through dockview's params — Settings' Terminal tab writes this key
+// via store.ts's setTerminalPrefs, and a running pane only needs its value
+// once, at construction.
+const TERMINAL_PREFS_KEY = "crs.terminalPrefs";
+function readTerminalPrefs(): { fontSize: number; cursorStyle: "block" | "bar" | "underline"; scrollback: number } {
+  const defaults = { fontSize: 14, cursorStyle: "block" as const, scrollback: 1000 };
+  try {
+    const raw = localStorage.getItem(TERMINAL_PREFS_KEY);
+    if (!raw) return defaults;
+    return { ...defaults, ...JSON.parse(raw) };
+  } catch {
+    return defaults;
+  }
+}
+
 function attachKeyConflictHandler(term: Terminal): void {
   term.attachCustomKeyEventHandler((event) => {
     if (event.type === "keydown" && event.ctrlKey && TERMINAL_RESERVED_KEYS.has(event.key.toLowerCase())) {
@@ -45,20 +62,38 @@ function attachKeyConflictHandler(term: Terminal): void {
 // (not to the panel's own lifetime) — closing this panel only tears down the
 // browser-side view; the WS close handler in terminal.ts explicitly does not
 // kill the session, matching the "browser tab close never kills the session"
-// premise from the plan.
-export function TerminalPane(props: IDockviewPanelProps<TerminalPaneParams>) {
+// premise from the plan. Deliberately typed on just `params` (not the full
+// IDockviewPanelProps) — this component never touches `api`/`containerApi`,
+// so it can be reused outside a dockview panel too (see Dock.tsx, which
+// renders a dock monitor's terminal without a real dockview panel at all).
+export function TerminalPane(props: { params: TerminalPaneParams }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  // Exposes a manual "Retry now" (design's Disconnected state) without
+  // remounting the terminal/xterm instance itself — `connect`/backoff live
+  // inside the effect below (closed over the real WS + timer), so this ref
+  // is how the render's button reaches in and calls them directly.
+  const retryRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
+    const prefs = readTerminalPrefs();
+    // Resolve the design's --term token to a literal color at construction
+    // time — xterm's theme.background is passed straight to a canvas
+    // fillStyle, which (unlike CSS) doesn't resolve custom properties on
+    // its own. A hardcoded #1e1e1e here (the prior value) would silently
+    // ignore the light theme entirely.
+    const termBg = getComputedStyle(container).getPropertyValue("--term").trim() || "#0d0d0d";
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 14,
+      cursorStyle: prefs.cursorStyle,
+      fontSize: prefs.fontSize,
+      scrollback: prefs.scrollback,
       fontFamily: "Menlo, Consolas, monospace",
-      theme: { background: "#1e1e1e" },
+      theme: { background: termBg },
       // Unicode11Addon reads term.unicode, which xterm gates behind this
       // flag as a "proposed" (not yet stabilized) API.
       allowProposedApi: true,
@@ -121,6 +156,7 @@ export function TerminalPane(props: IDockviewPanelProps<TerminalPaneParams>) {
     function connect(): void {
       if (destroyed) return;
       setStatus(reconnectAttempt === 0 ? "connecting" : "reconnecting");
+      setReconnectAttempt(reconnectAttempt);
 
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${protocol}//${location.host}/ws/terminal?sessionId=${props.params.sessionId}&cols=${term.cols}&rows=${term.rows}`;
@@ -153,6 +189,14 @@ export function TerminalPane(props: IDockviewPanelProps<TerminalPaneParams>) {
       });
     }
 
+    // "Retry now" (design's Disconnected state) — reset backoff to attempt
+    // 0 and reconnect immediately, without remounting the terminal itself.
+    retryRef.current = () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectAttempt = 0;
+      connect();
+    };
+
     connect();
 
     return () => {
@@ -170,9 +214,32 @@ export function TerminalPane(props: IDockviewPanelProps<TerminalPaneParams>) {
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
       {status !== "open" && (
         <div className={`terminal-status-overlay ${status}`}>
-          {status === "connecting" && "Connecting…"}
-          {status === "reconnecting" && "Reconnecting…"}
-          {status === "failed" && "Disconnected — could not reconnect"}
+          {status === "connecting" && (
+            <>
+              <SpinnerIcon size={22} className="terminal-status-spinner connecting" />
+              <span className="terminal-status-text">Connecting…</span>
+              <span className="terminal-status-subtext">attaching to host</span>
+            </>
+          )}
+          {status === "reconnecting" && (
+            <>
+              <SpinnerIcon size={22} className="terminal-status-spinner reconnecting" />
+              <span className="terminal-status-text">
+                Reconnecting… <span style={{ color: "var(--muted)" }}>({reconnectAttempt})</span>
+              </span>
+              <span className="terminal-status-subtext">connection dropped · retrying</span>
+            </>
+          )}
+          {status === "failed" && (
+            <>
+              <WifiOffIcon size={22} style={{ color: "var(--r)" }} />
+              <span className="terminal-status-text">Disconnected</span>
+              <button className="terminal-status-retry" onClick={() => retryRef.current()}>
+                <RefreshIcon size={13} />
+                Retry now
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

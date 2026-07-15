@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DockviewReact } from "dockview-react";
 import type { DockviewApi, DockviewReadyEvent, IDockviewPanelProps } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
@@ -7,21 +7,44 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher.js";
 import { TerminalPane } from "./TerminalPane.js";
 import type { TerminalPaneParams } from "./TerminalPane.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
-import { useDashboardStore } from "./store.js";
+import { Toolbar } from "./Toolbar.js";
+import { PaneTab } from "./PaneTab.js";
+import { PaneHeaderActions } from "./PaneHeaderActions.js";
+import { CommandPalette } from "./CommandPalette.js";
+import { Settings } from "./Settings.js";
+import type { SettingsSection } from "./Settings.js";
+import { Dock } from "./Dock.js";
+import { GridIcon, ServerRackIcon } from "./icons.js";
+import { useDashboardStore, LIVE_REFRESH_INTERVAL_MS } from "./store.js";
 import type { Session } from "./api.js";
 
 // Wrapped per-panel (not once around the whole dockview area) so a crash in
-// one session's terminal can't take out sibling panes too.
-const components = {
-  terminal: (props: IDockviewPanelProps<TerminalPaneParams>) => (
-    <ErrorBoundary>
-      <TerminalPane {...props} />
+// one session's terminal can't take out sibling panes too. Owns its own
+// `resetKey`, bumped by the boundary's "Reload pane" — a class component's
+// error state has no way to retry the exact subtree that threw, so the
+// fix is remounting a fresh <TerminalPane> under a new key instead.
+function TerminalPanelWrapper(props: IDockviewPanelProps<TerminalPaneParams>) {
+  const [resetKey, setResetKey] = useState(0);
+  return (
+    <ErrorBoundary onReset={() => setResetKey((k) => k + 1)}>
+      <TerminalPane key={resetKey} params={props.params} />
     </ErrorBoundary>
-  ),
+  );
+}
+
+const components = {
+  terminal: TerminalPanelWrapper,
 };
+
+// The custom tab component (PaneTab) carries the redesign's most important
+// distinction — close-pane (detach) vs. kill-session (guarded, ends the
+// program) — so it's the only tab component this app needs; every panel
+// type uses it (currently just "terminal").
+const tabComponents = { terminal: PaneTab };
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
 const DEFAULT_WORKSPACE_NAME = "Default";
+const MOBILE_BREAKPOINT_QUERY = "(max-width: 699px)";
 
 interface PendingSave {
   // Captured at *schedule* time, not read live at fire time — the load-
@@ -32,20 +55,45 @@ interface PendingSave {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PaletteState {
+  open: boolean;
+  scope: "global" | "project";
+  projectId: number | null;
+}
+
 export function App() {
   const [dockviewApi, setDockviewApi] = useState<DockviewApi | null>(null);
   // Only meaningful below the mobile breakpoint (see styles.css) — a no-op
   // on desktop, where .sidebar-wrapper ignores this class entirely.
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [workspacesLoaded, setWorkspacesLoaded] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [palette, setPalette] = useState<PaletteState>({ open: false, scope: "global", projectId: null });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");
+  // Bumped on every dockview layout change so the toolbar's pane count and
+  // the mobile switcher's tab list re-render off dockviewApi.panels, which
+  // dockview itself doesn't expose as reactive state.
+  const [panelsVersion, setPanelsVersion] = useState(0);
 
   const {
     workspaces,
+    projects,
+    sessions,
     activeWorkspaceId,
     refreshWorkspaces,
     createWorkspace,
     saveWorkspaceLayout,
     setActiveWorkspaceId,
+    theme,
+    notificationsEnabled,
+    startLiveRefresh,
+    sidebarCollapsed,
+    setSidebarCollapsed,
+    splitRequest,
+    clearSplitRequest,
+    backendReachable,
+    refreshSessions,
   } = useDashboardStore();
 
   // Guards against auto-creating "Default" twice — both from React
@@ -65,6 +113,10 @@ export function App() {
   // in-progress edits — every time `workspaces` changes for an unrelated
   // reason (e.g. renaming some other workspace).
   const restoredWorkspaceIdRef = useRef<number | null>(null);
+  // Which session ids already had `attention` the last time we checked, so
+  // the notification effect below only fires on the *transition* into
+  // attention, not on every live-refresh tick while it stays true.
+  const seenAttentionRef = useRef<Set<number>>(new Set());
 
   const flushPendingSave = useCallback(
     (api: DockviewApi) => {
@@ -178,16 +230,78 @@ export function App() {
 
   // Any real layout change (add/remove/move panel, or a splitter-drag
   // resize) schedules a debounced autosave, unless it's the restore
-  // effect's own echo.
+  // effect's own echo. Also bumps panelsVersion so the toolbar/mobile-tabs
+  // pane count/list re-render (dockview's own panel list isn't otherwise
+  // reactive from React's perspective).
   useEffect(() => {
     if (!dockviewApi || activeWorkspaceId === null) return;
     const workspaceId = activeWorkspaceId;
     const disposable = dockviewApi.onDidLayoutChange(() => {
+      setPanelsVersion((v) => v + 1);
       if (restoringRef.current) return;
       scheduleSave(dockviewApi, workspaceId);
     });
     return () => disposable.dispose();
   }, [dockviewApi, activeWorkspaceId, scheduleSave]);
+
+  // Mobile breakpoint detection — mirrors the design's own matchMedia usage
+  // (699px) rather than duplicating the value as a magic number elsewhere.
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
+    const onChange = () => {
+      setIsMobile(mq.matches);
+      if (!mq.matches) dockviewApi?.exitMaximizedGroup();
+    };
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [dockviewApi]);
+
+  const openSettings = useCallback((section: SettingsSection = "appearance") => {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+  }, []);
+
+  // Global keyboard shortcuts: ⌘K/Ctrl+K opens the launcher, ⌘,/Ctrl+, opens
+  // settings, Esc closes whichever overlay is open. Registered once,
+  // independent of what currently has DOM focus.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPalette((p) => ({ ...p, open: true, scope: "global" }));
+      } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        openSettings();
+      } else if (e.key === "Escape") {
+        setPalette((p) => ({ ...p, open: false }));
+        setSettingsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [openSettings]);
+
+  // Starts the ~4s session-status poll once (paused while the tab is
+  // hidden) so status badges reflect the backend without a mutation.
+  useEffect(() => startLiveRefresh(), [startLiveRefresh]);
+
+  // Fires a browser Notification on the *transition* into attention (not
+  // every poll tick it stays true) when the user has opted in via Settings
+  // and granted permission — the client-side half of WS-6's "collect the
+  // signals" scope; there's no server push, this is purely reacting to the
+  // live-refresh poll above.
+  useEffect(() => {
+    const attentionNow = new Set(sessions.filter((s) => s.attention).map((s) => s.id));
+    if (notificationsEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      for (const session of sessions) {
+        if (session.attention && !seenAttentionRef.current.has(session.id)) {
+          new Notification(session.name || session.command, { body: "Needs your input" });
+        }
+      }
+    }
+    seenAttentionRef.current = attentionNow;
+  }, [sessions, notificationsEnabled]);
 
   const onOpenSession = useCallback(
     (session: Session) => {
@@ -196,17 +310,20 @@ export function App() {
       const existing = dockviewApi.getPanel(panelId);
       if (existing) {
         existing.api.setActive();
+        if (isMobile) dockviewApi.maximizeGroup(existing);
       } else {
-        dockviewApi.addPanel({
+        const panel = dockviewApi.addPanel({
           id: panelId,
           component: "terminal",
+          tabComponent: "terminal",
           title: session.name || session.command,
           params: { sessionId: session.id },
         });
+        if (isMobile) dockviewApi.maximizeGroup(panel);
       }
       setSidebarOpen(false);
     },
-    [dockviewApi],
+    [dockviewApi, isMobile],
   );
 
   // A session ended via the sidebar's explicit "end session" action (as
@@ -220,22 +337,200 @@ export function App() {
     [dockviewApi],
   );
 
+  const openGlobalLauncher = useCallback(() => {
+    setPalette({ open: true, scope: "global", projectId: null });
+  }, []);
+
+  const openProjectLauncher = useCallback((projectId: number) => {
+    setPalette({ open: true, scope: "project", projectId });
+  }, []);
+
+  // A split-right/split-down click (PaneHeaderActions.tsx) signals intent
+  // via the store's `splitRequest` (that component can't receive props from
+  // here — dockview owns its render). Rather than an effect that computes
+  // the reference panel's project and then calls setPalette (the same
+  // setState-in-effect anti-pattern already worked around elsewhere in this
+  // file — see CommandPalette/Dock/Settings in Phase 4b), derive whether the
+  // palette should be open, and for which project, directly in render. A
+  // splitRequest whose reference panel/session can no longer be resolved
+  // (e.g. the pane was closed between the click and this render) simply
+  // fails to open a palette for it — inert until overwritten by a fresh
+  // request or cleared by the palette's own close handler.
+  const splitRequestProjectId = useMemo(() => {
+    if (!splitRequest || !dockviewApi) return null;
+    const panel = dockviewApi.getPanel(splitRequest.referencePanelId);
+    const sessionId = (panel?.params as TerminalPaneParams | undefined)?.sessionId;
+    return sessions.find((s) => s.id === sessionId)?.projectId ?? null;
+  }, [splitRequest, dockviewApi, sessions]);
+  const paletteOpen = palette.open || (splitRequest !== null && splitRequestProjectId !== null);
+  const paletteScope = splitRequest ? "project" : palette.scope;
+  const paletteProjectId = splitRequest ? splitRequestProjectId : palette.projectId;
+
+  // The palette's actual launch handler: if this launch was requested via a
+  // split action, add the new panel positioned next to the reference panel
+  // instead of the normal open-or-focus path (an already-open session for
+  // that id just gets focused — dockview panel ids are unique, and split's
+  // whole point is launching a *new* session, so this collision is rare).
+  // Falls back to the normal `onOpenSession` path for a non-split launch.
+  const handleLaunched = useCallback(
+    (session: Session) => {
+      if (!dockviewApi || !splitRequest) {
+        onOpenSession(session);
+        return;
+      }
+      const req = splitRequest;
+      clearSplitRequest();
+      const panelId = `session-${session.id}`;
+      const existing = dockviewApi.getPanel(panelId);
+      if (existing) {
+        existing.api.setActive();
+      } else {
+        const referencePanel = dockviewApi.getPanel(req.referencePanelId);
+        dockviewApi.addPanel({
+          id: panelId,
+          component: "terminal",
+          tabComponent: "terminal",
+          title: session.name || session.command,
+          params: { sessionId: session.id },
+          ...(referencePanel ? { position: { referencePanel, direction: req.direction } } : {}),
+        });
+      }
+      setSidebarOpen(false);
+    },
+    [dockviewApi, splitRequest, clearSplitRequest, onOpenSession],
+  );
+
+  // One toggle, two meanings depending on breakpoint: mobile's `sidebarOpen`
+  // is a closed-by-default overlay flag (App.tsx-local, not persisted —
+  // resets to closed every navigation, which is the right default for an
+  // overlay); desktop's `sidebarCollapsed` is a persisted, open-by-default
+  // panel-visibility preference (store-owned, survives reload). Same button,
+  // same handler, branch on the existing `isMobile` state.
+  const toggleSidebar = useCallback(() => {
+    if (isMobile) setSidebarOpen((v) => !v);
+    else setSidebarCollapsed(!sidebarCollapsed);
+  }, [isMobile, sidebarCollapsed, setSidebarCollapsed]);
+
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
+  const attentionCount = sessions.filter((s) => s.attention).length;
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-derives off panelsVersion, not a real dependency
+  const paneCount = useMemo(() => dockviewApi?.panels.length ?? 0, [dockviewApi, panelsVersion]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const mobilePanels = useMemo(() => dockviewApi?.panels ?? [], [dockviewApi, panelsVersion]);
+  const activePanelId = dockviewApi?.activePanel?.id;
+  const defaultDockProjectId = projects[0]?.id ?? null;
+
   return (
-    <div className="app">
-      <button className="sidebar-toggle" onClick={() => setSidebarOpen((v) => !v)}>
-        ☰
-      </button>
-      <div className={`sidebar-wrapper${sidebarOpen ? " open" : ""}`}>
-        <WorkspaceSwitcher />
-        <Sidebar onOpenSession={onOpenSession} onSessionEnded={onSessionEnded} />
+    <div
+      className={`app cmux-root${theme === "light" ? " light" : ""}${sidebarOpen ? " sb-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+    >
+      <Toolbar
+        onToggleSidebar={toggleSidebar}
+        attentionCount={attentionCount}
+        onOpenLauncher={openGlobalLauncher}
+        onOpenSettings={() => openSettings()}
+        activeWorkspaceName={activeWorkspace?.name ?? null}
+        paneCount={paneCount}
+      />
+      <div className="app-body">
+        <div className="cmux-scrim" onClick={() => setSidebarOpen(false)} />
+        <div className="sidebar-wrapper cmux-scroll">
+          <WorkspaceSwitcher />
+          <Sidebar
+            onOpenSession={onOpenSession}
+            onSessionEnded={onSessionEnded}
+            onOpenProjectLauncher={openProjectLauncher}
+            onOpenSettingsProjects={() => openSettings("projects")}
+          />
+        </div>
+        <div className="grid-area">
+          {/* Whole-backend-down — design States doc section 04. Docked at
+              the top of the grid area, rest of the UI dimmed (not
+              disabled) beneath it via .grid-area-body.dimmed, matching the
+              design's "frozen body" — a visual cue, not an actual input
+              lock, so nothing gets destructively stuck if this signal
+              itself turns out wrong. Reuses the existing live-refresh poll
+              (store.ts) rather than a separate health-check mechanism. */}
+          {!backendReachable && (
+            <div className="backend-down-banner">
+              <ServerRackIcon size={16} style={{ color: "var(--r)" }} />
+              <span className="backend-down-title">cmux server unreachable</span>
+              <span className="backend-down-subtext">
+                unix socket · retry in {LIVE_REFRESH_INTERVAL_MS / 1000}s…
+              </span>
+              <button className="backend-down-reconnect" onClick={() => void refreshSessions()}>
+                Reconnect
+              </button>
+            </div>
+          )}
+          <div className={`grid-area-body${!backendReachable ? " dimmed" : ""}`}>
+            {isMobile && mobilePanels.length > 0 && (
+              <div className="mobile-tabs">
+                {mobilePanels.map((panel) => {
+                  const sessionId = (panel.params as TerminalPaneParams | undefined)?.sessionId;
+                  const session = sessions.find((s) => s.id === sessionId);
+                  let dotColor = "var(--dim)";
+                  if (session?.attention) dotColor = "var(--ring)";
+                  else if (session?.activity === "working") dotColor = "var(--g)";
+                  return (
+                    <button
+                      key={panel.id}
+                      className={`mobile-tab${panel.id === activePanelId ? " active" : ""}`}
+                      onClick={() => {
+                        panel.api.setActive();
+                        dockviewApi?.maximizeGroup(panel);
+                      }}
+                    >
+                      <span className="mobile-tab-dot" style={{ background: dotColor }} />
+                      {panel.title}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <button className="sidebar-toggle" onClick={toggleSidebar}>
+              ☰
+            </button>
+            <div className="dockview-container">
+              <DockviewReact
+                className={theme === "light" ? "dockview-theme-light" : "dockview-theme-dark"}
+                components={components}
+                tabComponents={tabComponents}
+                rightHeaderActionsComponent={PaneHeaderActions}
+                onReady={onReady}
+              />
+              {/* Empty tiled grid (design States doc §1D) — an overlay, not a
+                  conditionally-mounted replacement, so dockview's own API
+                  instance stays alive underneath even at zero panes (unmounting
+                  <DockviewReact/> would drop dockviewApi and break future
+                  addPanel/restore calls). Desktop-only — mobile shows its own
+                  switcher instead of the tiled grid entirely. */}
+              {!isMobile && paneCount === 0 && (
+                <div className="empty-grid-dropzone" style={{ position: "absolute", inset: 0 }}>
+                  <GridIcon size={26} style={{ color: "var(--dim)" }} />
+                  <span className="empty-grid-title">Nothing tiled here yet</span>
+                  <span className="empty-grid-hint">⌘K to launch · pick a session from the sidebar</span>
+                </div>
+              )}
+            </div>
+            <Dock projectId={defaultDockProjectId} />
+          </div>
+        </div>
       </div>
-      <div className="dockview-container">
-        <DockviewReact
-          className="dockview-theme-dark"
-          components={components}
-          onReady={onReady}
+      {paletteOpen && (
+        <CommandPalette
+          scope={paletteScope}
+          projectId={paletteProjectId}
+          onClose={() => {
+            setPalette((p) => ({ ...p, open: false }));
+            clearSplitRequest();
+          }}
+          onLaunched={handleLaunched}
         />
-      </div>
+      )}
+      {settingsOpen && (
+        <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+      )}
     </div>
   );
 }
