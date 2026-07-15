@@ -495,8 +495,9 @@ body {
   color: var(--dim);
   cursor: grab;
   flex-shrink: 0;
-  opacity: 0;
+  opacity: 0.4;
   transition: opacity 0.1s;
+  user-select: none;
 }
 .ws-group-header:hover .ws-drag-handle,
 .workspace-item:hover .ws-drag-handle {

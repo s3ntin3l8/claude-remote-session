@@ -119,7 +119,23 @@ export function WorkspaceSwitcher() {
     .filter((w) => w.groupId === null)
     .sort((a, b) => a.position - b.position);
 
+  // dragTokenRef guards the deferred setDragging calls below (see
+  // startWorkspaceDrag/startGroupDrag): applying dragging state
+  // synchronously inside the native `dragstart` handler races with the
+  // browser's own drag-session setup — a DOM mutation landing in that same
+  // tick (e.g. the `.ws-dragging` class + transform) can make Chrome cancel
+  // the drag it just started, which showed up as "grabbing an ungrouped
+  // workspace does nothing" (mid-drag `dragend` firing within ~5ms, no
+  // `drag` events ever fired). Deferring the state update by a tick avoids
+  // that, but introduces its own race: a very fast drag can call endDrag()
+  // (from the native `dragend`) *before* the deferred update lands, and
+  // without a guard the stale update would resurrect `dragging` after the
+  // drag already ended, permanently stuck. The token makes the deferred
+  // update a no-op if any start/end has happened since it was scheduled.
+  const dragTokenRef = useRef(0);
+
   const endDrag = () => {
+    dragTokenRef.current += 1;
     setDragging(null);
     setDropTarget(null);
   };
@@ -128,8 +144,18 @@ export function WorkspaceSwitcher() {
     dragging,
     dropTarget,
     setDropTarget,
-    startWorkspaceDrag: (id) => setDragging({ kind: "workspace", id }),
-    startGroupDrag: (id) => setDragging({ kind: "group", id }),
+    startWorkspaceDrag: (id) => {
+      const token = (dragTokenRef.current += 1);
+      setTimeout(() => {
+        if (dragTokenRef.current === token) setDragging({ kind: "workspace", id });
+      }, 0);
+    },
+    startGroupDrag: (id) => {
+      const token = (dragTokenRef.current += 1);
+      setTimeout(() => {
+        if (dragTokenRef.current === token) setDragging({ kind: "group", id });
+      }, 0);
+    },
     commitWorkspaceDrop: (groupId, index) => {
       if (!dragging || dragging.kind !== "workspace") return;
       const asItems: ReorderItem[] = workspaces.map((w) => ({
