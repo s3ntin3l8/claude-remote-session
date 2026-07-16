@@ -92,12 +92,15 @@ startup. `build-docker` needs `contents: read` + `packages: write` +
 `security-events: write`; `release-please` needs `contents: write` +
 `pull-requests: write`. See the `s3ntin3l8/.github` README for the full table.
 
-`ci-node` installs via `npm ci`, runs lint + `test:coverage`, and uploads coverage to
-Codecov.
-
-> **Codecov TODO:** coverage upload requires a `CODECOV_TOKEN` repo secret and the
-> repo onboarded on [codecov.io](https://about.codecov.io/) before results/badges
-> show. The workflow runs the upload unconditionally; it just no-ops without the token.
+`ci-cd.yml` calls the reusable `ci-node.yml` **twice** — `test-node` (root,
+`test-script: test:coverage`, `coverage-fail-under: 80`) and `test-frontend`
+(`working-directory: frontend`, its own lockfile/typecheck/test scripts, no
+coverage floor since the frontend has no `test:coverage` script). Both run
+`npm ci`, lint, typecheck, `format:check`, then tests; `build-docker` needs
+both to pass. Coverage uploads to Codecov (`CODECOV_TOKEN` is configured);
+`codecov.yml` sets the patch-coverage target to 75% — Codecov's un-configured
+default is `auto` (match current project coverage, ~94%), which fails even
+small, well-tested diffs and isn't a required check for merging.
 
 ## Git workflow
 
