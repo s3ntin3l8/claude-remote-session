@@ -31,7 +31,14 @@ export interface AttentionSignal {
 const OSC_SEQUENCE = /\x1b\](\d+);([\s\S]*?)(?:\x07|\x1b\\)/g;
 
 export function detectAttentionSignals(chunk: string): AttentionSignal {
-  const bell = chunk.includes("\x07");
+  // A BEL byte is only a real "bell" signal when it's not just the
+  // terminator of an OSC sequence (title-set, palette query, ...) — e.g.
+  // bash emits `ESC]0;title BEL` on every prompt draw, which otherwise
+  // false-positives as attention on the very first output chunk of a brand
+  // new session (confirmed empirically: a fresh `bash -i`'s first chunk is
+  // exactly `ESC]0;<title>BEL<prompt>`). Strip matched OSC sequences before
+  // testing so only a bare/stray BEL counts.
+  const bell = chunk.replace(OSC_SEQUENCE, "").includes("\x07");
   let notification = false;
   let titleChange: string | null = null;
 

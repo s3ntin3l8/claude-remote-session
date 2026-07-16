@@ -30,7 +30,7 @@ dockview frontend) lands per the plan's milestones.
 |---------|------|
 | `make install` | Install dependencies (`npm ci`). |
 | `make install-hooks` | Install pre-commit + pre-push hooks. |
-| `make dev` | Start the dev server with reload (`tsx watch`). |
+| `make dev` | Start backend (`tsx watch`) + frontend (Vite, HMR) together via `concurrently`. |
 | `make test` | Run the Vitest suite. |
 | `make test-coverage` | Run tests with coverage (`vitest run --coverage`). |
 | `make lint` | Run ESLint. |

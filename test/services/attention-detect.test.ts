@@ -22,11 +22,11 @@ describe("detectAttentionSignals", () => {
     });
   });
 
-  it("detects an OSC 9 notification terminated with BEL", () => {
+  it("detects an OSC 9 notification terminated with BEL, without counting the terminator as a bare bell", () => {
     const chunk = `${ESC}]9;Build finished${BEL}`;
     const result = detectAttentionSignals(chunk);
     expect(result.notification).toBe(true);
-    expect(result.bell).toBe(true); // BEL terminator also counts as a bell
+    expect(result.bell).toBe(false); // BEL is just the OSC terminator here, not a bare bell
   });
 
   it("detects an OSC 777 notification terminated with ST", () => {
@@ -53,19 +53,27 @@ describe("detectAttentionSignals", () => {
     expect(detectAttentionSignals(chunk).titleChange).toBe("second");
   });
 
-  it("ignores OSC codes that aren't 0/2/9/777", () => {
+  it("ignores OSC codes that aren't 0/2/9/777, and doesn't count their BEL terminator as a bell", () => {
     const chunk = `${ESC}]4;1;rgb:00/00/00${BEL}`; // OSC 4 = palette color
     expect(detectAttentionSignals(chunk)).toEqual({
-      bell: true,
+      bell: false,
       notification: false,
       titleChange: null,
     });
   });
 
-  it("detects multiple distinct signals within one chunk", () => {
+  it("still detects a bare bell alongside OSC-terminator BELs in the same chunk", () => {
+    const chunk = `some output${ESC}]2;title${BEL}more output${BEL}${ESC}]9;notify${BEL}`;
+    const result = detectAttentionSignals(chunk);
+    expect(result.bell).toBe(true); // the standalone BEL between "more output" and the OSC 9 sequence
+    expect(result.notification).toBe(true);
+    expect(result.titleChange).toBe("title");
+  });
+
+  it("does not treat a title/notification OSC sequence's BEL terminator as a bare bell", () => {
     const chunk = `some output${ESC}]2;title${BEL}more output${ESC}]9;notify${BEL}`;
     const result = detectAttentionSignals(chunk);
-    expect(result.bell).toBe(true);
+    expect(result.bell).toBe(false);
     expect(result.notification).toBe(true);
     expect(result.titleChange).toBe("title");
   });

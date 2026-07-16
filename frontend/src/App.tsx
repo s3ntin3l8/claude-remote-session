@@ -498,6 +498,11 @@ export function App() {
                 tabComponents={tabComponents}
                 rightHeaderActionsComponent={PaneHeaderActions}
                 onReady={onReady}
+                // A lone tab is otherwise sized to its own content, leaving
+                // most of the tab strip empty and the title/status cramped
+                // — full-width mode stretches a single tab to fill the
+                // group instead.
+                singleTabMode="fullwidth"
               />
               {/* Empty tiled grid (design States doc §1D) — an overlay, not a
                   conditionally-mounted replacement, so dockview's own API

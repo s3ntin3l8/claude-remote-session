@@ -9,7 +9,9 @@
     "node": ">=26"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "concurrently -n backend,frontend -c blue,green \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "tsx watch src/server.ts",
+    "dev:frontend": "npm run dev --prefix frontend",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "test": "vitest run",
@@ -43,6 +45,7 @@
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.10",
+    "concurrently": "^10.0.3",
     "drizzle-kit": "^0.31.1",
     "eslint": "^10.7.0",
     "prettier": "^3.9.5",

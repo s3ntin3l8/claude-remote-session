@@ -41,7 +41,7 @@ export function Sidebar({
   // Lifted here (rather than owned entirely inside DiscoverProjects) so the
   // "Welcome to cmux" empty state's "Scan for repos" button can force it
   // open, matching the design's two-button first-run CTA.
-  const [discoverCollapsed, setDiscoverCollapsed] = useState(true);
+  const [discoverCollapsed, setDiscoverCollapsed] = useState(false);
 
   useEffect(() => {
     void refreshProjects();
