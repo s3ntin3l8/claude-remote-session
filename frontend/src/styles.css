@@ -447,13 +447,20 @@ body {
   color: var(--dim);
   flex-shrink: 0;
 }
+/* Same 22x22 centered box as .kebab-trigger-btn — see the matching comment
+   on .workspace-item-actions button above. */
 .ws-group-actions button {
-  background: none;
-  border: none;
-  color: inherit;
-  cursor: pointer;
+  width: 22px;
+  height: 22px;
   padding: 0;
   display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 .ws-group-actions button:hover {
   color: var(--fg);
@@ -515,17 +522,28 @@ body {
 }
 .workspace-item-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
   color: var(--dim);
   flex-shrink: 0;
 }
+/* Same 22x22 centered box as .kebab-trigger-btn (below) — without an
+   explicit box, this button only sizes to its 13px icon and (with no
+   align-items set) the flex default stretches it to match its taller
+   kebab-menu sibling while leaving the icon pinned to the stretched box's
+   top edge, so it reads visibly higher than the kebab's dots. */
 .workspace-item-actions button {
-  background: none;
-  border: none;
-  color: inherit;
-  cursor: pointer;
+  width: 22px;
+  height: 22px;
   padding: 0;
   display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 .workspace-item-actions button:hover {
   color: var(--fg);

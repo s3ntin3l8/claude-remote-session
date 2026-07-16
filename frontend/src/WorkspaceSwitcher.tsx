@@ -578,32 +578,6 @@ function WorkspaceItem({
   const [draftName, setDraftName] = useState(workspace.name);
   const rowRef = useRef<HTMLDivElement>(null);
 
-  if (editing) {
-    return (
-      <div className="workspace-item">
-        <input
-          autoFocus
-          className="workspace-rename-input"
-          value={draftName}
-          onChange={(e) => setDraftName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              if (draftName.trim()) onRename(draftName.trim());
-              setEditing(false);
-            } else if (e.key === "Escape") {
-              setDraftName(workspace.name);
-              setEditing(false);
-            }
-          }}
-          onBlur={() => {
-            if (draftName.trim() && draftName !== workspace.name) onRename(draftName.trim());
-            setEditing(false);
-          }}
-        />
-      </div>
-    );
-  }
-
   return (
     <div
       ref={rowRef}
@@ -638,15 +612,39 @@ function WorkspaceItem({
         <GripIcon size={13} />
       </span>
       <GridIcon size={14} className="workspace-item-icon" />
-      <span
-        className="workspace-item-name"
-        onDoubleClick={(e) => {
-          e.stopPropagation();
-          setEditing(true);
-        }}
-      >
-        {workspace.name}
-      </span>
+      {editing ? (
+        <input
+          autoFocus
+          className="workspace-rename-input"
+          value={draftName}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setDraftName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              if (draftName.trim()) onRename(draftName.trim());
+              setEditing(false);
+            } else if (e.key === "Escape") {
+              setDraftName(workspace.name);
+              setEditing(false);
+            }
+          }}
+          onBlur={() => {
+            if (draftName.trim() && draftName !== workspace.name) onRename(draftName.trim());
+            setEditing(false);
+          }}
+        />
+      ) : (
+        <span
+          className="workspace-item-name"
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            setDraftName(workspace.name);
+            setEditing(true);
+          }}
+        >
+          {workspace.name}
+        </span>
+      )}
       {liveStatus === "attention" && (
         <span className="workspace-attn-dot" title="Session needs input" />
       )}
