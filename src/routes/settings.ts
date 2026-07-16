@@ -51,11 +51,12 @@ export async function settingsRoute(app: FastifyInstance) {
         app.reconfigureReconciler(next.sessions.reconcileIntervalSeconds);
       }
 
-      // Explicit content-type — see the GET handler's comment above; the
-      // response body echoes patch-supplied string fields (e.g. theme,
-      // sessions.namePattern) straight back to the caller.
+      // Explicit content-type — see the GET handler's comment above.
       reply.type("application/json");
-      return next;
+      // Re-read rather than returning `next` directly: same persisted
+      // value, but the response no longer flows straight from
+      // request.body through this function's return.
+      return getStoredSettings(app.db);
     },
   );
 }
