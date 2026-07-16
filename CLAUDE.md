@@ -11,23 +11,27 @@ before touching `src/services/pty-manager.ts` or the terminal WS protocol.
 
 ## Commands (Makefile)
 
-| Command | Does |
-|---------|------|
-| `make install` | Install dependencies (`npm ci`). |
-| `make install-hooks` | Install pre-commit + pre-push hooks. |
-| `make dev` | Start backend (`tsx watch`) + frontend (Vite, HMR) together via `concurrently`. |
-| `make test` | Run the Vitest suite. |
-| `make test-coverage` | Run tests with coverage (`vitest run --coverage`). |
-| `make lint` | Run ESLint. |
-| `make typecheck` | Type-check with `tsc --noEmit`. |
-| `make build` | Production build → `dist/`. |
-| `make clean` | Remove `node_modules`, `dist`, and caches. |
+| Command              | Does                                                                            |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `make install`       | Install dependencies (`npm ci`).                                                |
+| `make install-hooks` | Install pre-commit + pre-push hooks.                                            |
+| `make dev`           | Start backend (`tsx watch`) + frontend (Vite, HMR) together via `concurrently`. |
+| `make test`          | Run the Vitest suite.                                                           |
+| `make test-coverage` | Run tests with coverage (`vitest run --coverage`).                              |
+| `make lint`          | Run ESLint.                                                                     |
+| `make typecheck`     | Type-check with `tsc --noEmit`.                                                 |
+| `make format`        | Format the whole repo with Prettier (`--write`, includes `frontend/`).          |
+| `make format-check`  | Check formatting without writing — the pre-push gate.                           |
+| `make build`         | Production build → `dist/`.                                                     |
+| `make clean`         | Remove `node_modules`, `dist`, and caches.                                      |
 
-`make dev`/`test`/`lint`/`typecheck` cover the backend only. The frontend
-(`frontend/`) is a separate npm workspace with its own `dev`/`build`/`lint`/
-`typecheck` scripts — run them from `frontend/` (or see `README.md`'s Quick
-Start). Direct npm equivalents also exist for the backend: `npm run db:generate`
-(after `src/db/schema.ts` edits) and `npm run db:seed`.
+`make dev`/`test`/`lint`/`typecheck` cover the backend only; `format`/
+`format-check` run repo-wide (they resolve `.prettierrc` from the root and
+cover `frontend/` too — see `.prettierignore` for excluded generated/vendored
+paths). The frontend is a separate npm workspace with its own `dev`/`build`/
+`lint`/`typecheck` scripts — run them from `frontend/` (or see `README.md`'s
+Quick Start). Direct npm equivalents also exist for the backend: `npm run
+db:generate` (after `src/db/schema.ts` edits) and `npm run db:seed`.
 
 ## Architecture / Layout
 
@@ -52,7 +56,7 @@ Start). Direct npm equivalents also exist for the backend: `npm run db:generate`
 - **The non-obvious model** — read this before touching sessions or
   workspaces: a session is a host PTY attached via `dtach`, running inside a
   transient `systemd --user` scope so it survives service redeploys/restarts.
-  The `sessions` DB row records *intent* (has this been explicitly killed?);
+  The `sessions` DB row records _intent_ (has this been explicitly killed?);
   live process state lives only in `PtyManager`'s in-memory map, and routes
   merge the two rather than trusting the DB column alone. `sessions.command`
   and `workspaces.layout` are deliberately **opaque blobs** — the backend

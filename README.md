@@ -8,7 +8,8 @@ dashboard is a thin attach-client, not the process owner.
 Backend: [Fastify](https://fastify.dev/) + TypeScript (ESM) +
 SQLite/[Drizzle](https://orm.drizzle.team/), with security middleware and full
 CI/CD. Frontend: React + [dockview](https://dockview.dev/) (tiled splits/tabs)
-+ [xterm.js](https://xtermjs.org/).
+
+- [xterm.js](https://xtermjs.org/).
 
 > **Status:** the backend is feature-complete for projects, durable sessions,
 > named/grouped workspace layouts, project discovery, unified launchers
@@ -77,20 +78,20 @@ curl localhost:3000/api/projects
 
 All config is validated at startup by `@fastify/env` (see `src/plugins/env.ts`).
 
-| Variable            | Default              | Description                                                  |
-| ------------------- | --------------------- | ------------------------------------------------------------ |
-| `NODE_ENV`          | `development`         | `development` \| `production` \| `test`                     |
-| `PORT`              | `3000`                | HTTP listen port                                             |
-| `LOG_LEVEL`         | `info`                | pino log level                                                |
-| `DATABASE_URL`      | `file:./data/app.db`  | SQLite `file:` URL                                            |
-| `DB_ENCRYPTION_KEY` | _(empty)_             | base64url 32-byte key; enables encryption-at-rest             |
-| `CORS_ORIGIN`       | _(empty)_             | comma-separated allowlist; empty disables CORS                |
-| `RATE_LIMIT_MAX`    | `100`                 | max requests per window                                       |
-| `RATE_LIMIT_WINDOW` | `1 minute`            | rate-limit window                                             |
-| `SESSIONS_DIR`      | `./data/sessions`     | dir holding one dtach socket per terminal session             |
-| `FRONTEND_DIST`     | `./frontend/dist`     | built frontend assets; served at `/` once present             |
-| `PROJECTS_ROOTS`    | _(empty)_             | comma-separated dirs to scan for `GET /api/projects/discover` |
-| `CRS_CONFIG_DIR`    | `~/.config/crs`       | global launcher/dock config dir (a project's own `.crs/` wins) |
+| Variable            | Default              | Description                                                    |
+| ------------------- | -------------------- | -------------------------------------------------------------- |
+| `NODE_ENV`          | `development`        | `development` \| `production` \| `test`                        |
+| `PORT`              | `3000`               | HTTP listen port                                               |
+| `LOG_LEVEL`         | `info`               | pino log level                                                 |
+| `DATABASE_URL`      | `file:./data/app.db` | SQLite `file:` URL                                             |
+| `DB_ENCRYPTION_KEY` | _(empty)_            | base64url 32-byte key; enables encryption-at-rest              |
+| `CORS_ORIGIN`       | _(empty)_            | comma-separated allowlist; empty disables CORS                 |
+| `RATE_LIMIT_MAX`    | `100`                | max requests per window                                        |
+| `RATE_LIMIT_WINDOW` | `1 minute`           | rate-limit window                                              |
+| `SESSIONS_DIR`      | `./data/sessions`    | dir holding one dtach socket per terminal session              |
+| `FRONTEND_DIST`     | `./frontend/dist`    | built frontend assets; served at `/` once present              |
+| `PROJECTS_ROOTS`    | _(empty)_            | comma-separated dirs to scan for `GET /api/projects/discover`  |
+| `CRS_CONFIG_DIR`    | `~/.config/crs`      | global launcher/dock config dir (a project's own `.crs/` wins) |
 
 Generate an encryption key:
 
