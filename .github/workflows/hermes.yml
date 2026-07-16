@@ -1,0 +1,56 @@
+name: Hermes (review)
+
+# Two ways to get a review from the s3ntin3l8-hermes bot:
+#   1. auto-review    -> every non-draft PR, automatically, on open/push.
+#   2. on-demand-review -> comment "@s3ntin3l8-hermes Review" (or "Triage" on
+#      an issue) on a PR/issue at any time.
+# Both call the same reusable workflow (s3ntin3l8/.github/.github/workflows/
+# hermes-review.yml@main) with a different `mode`, gated by github.event_name
+# so each job only runs for its own trigger.
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+    # `opened`           => review once when a PR is opened.
+    # `synchronize`      => re-review on pushes to the PR. The reusable workflow's
+    # "already reviewed" guard skips repeats, so it effectively re-reviews only
+    # after the prior review is dismissed.
+    # `ready_for_review` => review when a draft PR is marked ready. `opened` on a
+    # draft is skipped below, so without this type a draft->ready PR would only
+    # get its first review on the *next* push, not on the transition itself.
+  issue_comment:
+    types: [created]
+    # Covers both PR-conversation comments and issue comments. The reusable
+    # workflow's "Check mention" step enforces the "@s3ntin3l8-hermes" substring
+    # in on-demand mode (default), so a plain comment without the mention is a
+    # cheap no-op, not a review.
+
+jobs:
+  auto-review:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.actor != 's3ntin3l8-hermes[bot]' &&
+      github.event.pull_request.draft == false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mode: auto # review on trigger, no @mention needed
+      mention-trigger: s3ntin3l8-hermes
+    secrets: inherit # pragma: allowlist secret
+
+  on-demand-review:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.actor != 's3ntin3l8-hermes[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
+    secrets: inherit # pragma: allowlist secret
