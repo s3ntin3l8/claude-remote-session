@@ -3,7 +3,8 @@ import type { DragEvent } from "react";
 import { useDashboardStore } from "./store.js";
 import { CreateGroupModal } from "./CreateGroupModal.js";
 import { KebabMenu } from "./KebabMenu.js";
-import { computeGroupReorder, computeReorder } from "./reorder.js";
+import { ConfirmButton } from "./ConfirmButton.js";
+import { computeReorder } from "./reorder.js";
 import type { ReorderItem } from "./reorder.js";
 import type { Group, Session, Workspace } from "./api.js";
 import {
@@ -26,14 +27,17 @@ import {
 //
 // Workspace Groups (vision #4): a collapsible named container a workspace
 // can optionally belong to. Ported from the design's "Workspaces" section —
-// groups render first (sorted by position), then any ungrouped workspaces
-// as a flat list below, same as before groups existed.
+// groups render first (sorted alphabetically), then any ungrouped workspaces
+// as a flat list below, same as before groups existed. Groups themselves are
+// NOT drag-reorderable (alphabetical order is the whole point — nothing to
+// choreograph); only workspaces are.
 //
-// Phase 4d added drag-and-drop for both workspace reordering/group-
-// assignment and group reordering (design section 07, "workspace-group
-// choreography") — native HTML5 DnD, no library, matching the rest of this
-// app's zero-dependency style. See reorder.ts for the pure reindex math
-// this file drives.
+// Phase 4d added drag-and-drop for workspace reordering/group-assignment
+// (design section 07, "workspace-group choreography") — native HTML5 DnD, no
+// library, matching the rest of this app's zero-dependency style. See
+// reorder.ts for the pure reindex math this file drives. (Group reordering
+// was part of that same phase but was later dropped in favor of alphabetical
+// sort — see git history if resurrecting it.)
 
 // A workspace's `layout` is an opaque dockview blob (see api.ts) — this
 // walks it generically looking for any `sessionId` value, without assuming
@@ -78,21 +82,18 @@ function workspaceLiveStatus(workspace: Workspace, sessions: Session[]): Workspa
 // dragged in, drop-position indicator when another group is dragged) —
 // disambiguated below by branching on `dragging.kind`, not by which handler
 // fired.
-type DragState = { kind: "workspace" | "group"; id: number };
+type DragState = { kind: "workspace"; id: number };
 
 type DropTarget =
   | { mode: "workspace-reorder"; groupId: number | null; index: number }
-  | { mode: "workspace-assign"; groupId: number }
-  | { mode: "group-reorder"; index: number };
+  | { mode: "workspace-assign"; groupId: number };
 
 interface DragCtx {
   dragging: DragState | null;
   dropTarget: DropTarget | null;
   setDropTarget: (t: DropTarget | null) => void;
   startWorkspaceDrag: (id: number) => void;
-  startGroupDrag: (id: number) => void;
   commitWorkspaceDrop: (groupId: number | null, index: number) => void;
-  commitGroupDrop: (index: number) => void;
   endDrag: () => void;
 }
 
@@ -111,7 +112,6 @@ export function WorkspaceSwitcher() {
     updateGroup,
     deleteGroup,
     reorderWorkspaces,
-    reorderGroups,
   } = useDashboardStore();
   const [showNewWorkspace, setShowNewWorkspace] = useState(false);
   const [addGroupOpen, setAddGroupOpen] = useState(false);
@@ -122,24 +122,24 @@ export function WorkspaceSwitcher() {
     void refreshGroups();
   }, [refreshGroups]);
 
-  const sortedGroups = [...groups].sort((a, b) => a.position - b.position);
+  const sortedGroups = [...groups].sort((a, b) => a.name.localeCompare(b.name));
   const ungrouped = workspaces
     .filter((w) => w.groupId === null)
     .sort((a, b) => a.position - b.position);
 
-  // dragTokenRef guards the deferred setDragging calls below (see
-  // startWorkspaceDrag/startGroupDrag): applying dragging state
-  // synchronously inside the native `dragstart` handler races with the
-  // browser's own drag-session setup — a DOM mutation landing in that same
-  // tick (e.g. the `.ws-dragging` class + transform) can make Chrome cancel
-  // the drag it just started, which showed up as "grabbing an ungrouped
-  // workspace does nothing" (mid-drag `dragend` firing within ~5ms, no
-  // `drag` events ever fired). Deferring the state update by a tick avoids
-  // that, but introduces its own race: a very fast drag can call endDrag()
-  // (from the native `dragend`) *before* the deferred update lands, and
-  // without a guard the stale update would resurrect `dragging` after the
-  // drag already ended, permanently stuck. The token makes the deferred
-  // update a no-op if any start/end has happened since it was scheduled.
+  // dragTokenRef guards the deferred setDragging call below (see
+  // startWorkspaceDrag): applying dragging state synchronously inside the
+  // native `dragstart` handler races with the browser's own drag-session
+  // setup — a DOM mutation landing in that same tick (e.g. the
+  // `.ws-dragging` class + transform) can make Chrome cancel the drag it
+  // just started, which showed up as "grabbing an ungrouped workspace does
+  // nothing" (mid-drag `dragend` firing within ~5ms, no `drag` events ever
+  // fired). Deferring the state update by a tick avoids that, but introduces
+  // its own race: a very fast drag can call endDrag() (from the native
+  // `dragend`) *before* the deferred update lands, and without a guard the
+  // stale update would resurrect `dragging` after the drag already ended,
+  // permanently stuck. The token makes the deferred update a no-op if any
+  // start/end has happened since it was scheduled.
   const dragTokenRef = useRef(0);
 
   const endDrag = () => {
@@ -158,12 +158,6 @@ export function WorkspaceSwitcher() {
         if (dragTokenRef.current === token) setDragging({ kind: "workspace", id });
       }, 0);
     },
-    startGroupDrag: (id) => {
-      const token = (dragTokenRef.current += 1);
-      setTimeout(() => {
-        if (dragTokenRef.current === token) setDragging({ kind: "group", id });
-      }, 0);
-    },
     commitWorkspaceDrop: (groupId, index) => {
       if (!dragging || dragging.kind !== "workspace") return;
       const asItems: ReorderItem[] = workspaces.map((w) => ({
@@ -173,32 +167,8 @@ export function WorkspaceSwitcher() {
       }));
       void reorderWorkspaces(computeReorder(asItems, dragging.id, index, groupId));
     },
-    commitGroupDrop: (index) => {
-      if (!dragging || dragging.kind !== "group") return;
-      void reorderGroups(
-        computeGroupReorder(
-          sortedGroups.map((g) => ({ id: g.id, position: g.position })),
-          dragging.id,
-          index,
-        ),
-      );
-    },
     endDrag,
   };
-
-  // Mirrors WorkspaceList's own running-index trick below, applied to the
-  // top-level group sequence — a group being dragged reorders against this
-  // same index math, just with no `groupId` bucket concept (there's no
-  // "group of groups").
-  const draggingGroupId = dragging?.kind === "group" ? dragging.id : null;
-  const showGroupIndicator = (idx: number) =>
-    draggingGroupId !== null && dropTarget?.mode === "group-reorder" && dropTarget.index === idx;
-  // Index "excluding the dragged group" via lookup rather than a running
-  // counter mutated inside .map() — a plain mutable variable reassigned
-  // across a render's map callback trips this project's
-  // react-hooks/immutability lint rule, and a lookup array is just as
-  // simple here.
-  const nonDraggedGroupIds = sortedGroups.filter((g) => g.id !== draggingGroupId).map((g) => g.id);
 
   return (
     <div className="workspace-switcher">
@@ -221,74 +191,38 @@ export function WorkspaceSwitcher() {
         />
       )}
 
-      {sortedGroups.map((group) => {
-        const isThisDragging = draggingGroupId === group.id;
-        const idx = isThisDragging
-          ? nonDraggedGroupIds.length
-          : nonDraggedGroupIds.indexOf(group.id);
-
-        return (
-          <div key={group.id}>
-            {!isThisDragging && showGroupIndicator(idx) && <div className="ws-drop-indicator" />}
-            <GroupSection
-              group={group}
-              workspaces={workspaces
-                .filter((w) => w.groupId === group.id)
-                .sort((a, b) => a.position - b.position)}
-              sessions={sessions}
-              activeWorkspaceId={activeWorkspaceId}
-              onSelect={setActiveWorkspaceId}
-              onRename={(id, name) => void renameWorkspace(id, name)}
-              onDelete={(id) => void deleteWorkspace(id)}
-              onToggleCollapsed={() => void updateGroup(group.id, { collapsed: !group.collapsed })}
-              onEditGroup={(name, color) => void updateGroup(group.id, { name, color })}
-              onDeleteGroup={() => void deleteGroup(group.id)}
-              dragCtx={dragCtx}
-              isDragging={isThisDragging}
-              isDimmed={draggingGroupId !== null && !isThisDragging}
-              onHeaderDragOver={
-                isThisDragging
-                  ? undefined
-                  : (e) => {
-                      if (!dragCtx.dragging) return;
-                      e.preventDefault();
-                      if (dragCtx.dragging.kind === "workspace") {
-                        dragCtx.setDropTarget({ mode: "workspace-assign", groupId: group.id });
-                      } else {
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const before = e.clientY < rect.top + rect.height / 2;
-                        dragCtx.setDropTarget({
-                          mode: "group-reorder",
-                          index: before ? idx : idx + 1,
-                        });
-                      }
-                    }
-              }
-              onHeaderDrop={
-                isThisDragging
-                  ? undefined
-                  : (e) => {
-                      if (!dragCtx.dragging) return;
-                      e.preventDefault();
-                      if (
-                        dragCtx.dragging.kind === "workspace" &&
-                        dragCtx.dropTarget?.mode === "workspace-assign"
-                      ) {
-                        dragCtx.commitWorkspaceDrop(dragCtx.dropTarget.groupId, 0);
-                      } else if (
-                        dragCtx.dragging.kind === "group" &&
-                        dragCtx.dropTarget?.mode === "group-reorder"
-                      ) {
-                        dragCtx.commitGroupDrop(dragCtx.dropTarget.index);
-                      }
-                      dragCtx.endDrag();
-                    }
-              }
-            />
-          </div>
-        );
-      })}
-      {showGroupIndicator(nonDraggedGroupIds.length) && <div className="ws-drop-indicator" />}
+      {sortedGroups.map((group) => (
+        <GroupSection
+          key={group.id}
+          group={group}
+          workspaces={workspaces
+            .filter((w) => w.groupId === group.id)
+            .sort((a, b) => a.position - b.position)}
+          sessions={sessions}
+          activeWorkspaceId={activeWorkspaceId}
+          onSelect={setActiveWorkspaceId}
+          onRename={(id, name) => void renameWorkspace(id, name)}
+          onDelete={(id) => void deleteWorkspace(id)}
+          onToggleCollapsed={() => void updateGroup(group.id, { collapsed: !group.collapsed })}
+          onEditGroup={(name, color) => void updateGroup(group.id, { name, color })}
+          onRenameGroup={(name) => void updateGroup(group.id, { name })}
+          onDeleteGroup={() => void deleteGroup(group.id)}
+          dragCtx={dragCtx}
+          onHeaderDragOver={(e) => {
+            if (!dragCtx.dragging) return;
+            e.preventDefault();
+            dragCtx.setDropTarget({ mode: "workspace-assign", groupId: group.id });
+          }}
+          onHeaderDrop={(e) => {
+            if (!dragCtx.dragging) return;
+            e.preventDefault();
+            if (dragCtx.dropTarget?.mode === "workspace-assign") {
+              dragCtx.commitWorkspaceDrop(dragCtx.dropTarget.groupId, 0);
+            }
+            dragCtx.endDrag();
+          }}
+        />
+      ))}
 
       <WorkspaceList
         bucketGroupId={null}
@@ -336,10 +270,9 @@ function GroupSection({
   onDelete,
   onToggleCollapsed,
   onEditGroup,
+  onRenameGroup,
   onDeleteGroup,
   dragCtx,
-  isDragging,
-  isDimmed,
   onHeaderDragOver,
   onHeaderDrop,
 }: {
@@ -352,15 +285,15 @@ function GroupSection({
   onDelete: (id: number) => void;
   onToggleCollapsed: () => void;
   onEditGroup: (name: string, color: string) => void;
+  onRenameGroup: (name: string) => void;
   onDeleteGroup: () => void;
   dragCtx: DragCtx;
-  isDragging: boolean;
-  isDimmed: boolean;
   onHeaderDragOver?: (e: DragEvent<HTMLDivElement>) => void;
   onHeaderDrop?: (e: DragEvent<HTMLDivElement>) => void;
 }) {
   const [editOpen, setEditOpen] = useState(false);
-  const headerRef = useRef<HTMLDivElement>(null);
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState(group.name);
 
   const isAssignTarget =
     dragCtx.dragging?.kind === "workspace" &&
@@ -370,46 +303,65 @@ function GroupSection({
   return (
     <div className="ws-group">
       <div
-        ref={headerRef}
-        className={`ws-group-header${isDragging ? " ws-dragging" : ""}${isDimmed ? " ws-sibling-dim" : ""}${
-          isAssignTarget ? " ws-group-drop-target" : ""
-        }`}
+        className={`ws-group-header${isAssignTarget ? " ws-group-drop-target" : ""}`}
         onClick={onToggleCollapsed}
         onDragOver={onHeaderDragOver}
         onDrop={onHeaderDrop}
       >
-        <span
-          className="ws-drag-handle"
-          draggable
-          title="Drag to reorder"
-          onClick={(e) => e.stopPropagation()}
-          onDragStart={(e) => {
-            e.stopPropagation();
-            e.dataTransfer.effectAllowed = "move";
-            e.dataTransfer.setData("text/plain", String(group.id));
-            if (headerRef.current) {
-              const rect = headerRef.current.getBoundingClientRect();
-              e.dataTransfer.setDragImage(
-                headerRef.current,
-                e.clientX - rect.left,
-                e.clientY - rect.top,
-              );
-            }
-            dragCtx.startGroupDrag(group.id);
-          }}
-          onDragEnd={dragCtx.endDrag}
-        >
-          <GripIcon size={13} />
-        </span>
         <ChevronDownIcon
           size={12}
           className={`ws-group-chevron${group.collapsed ? " collapsed" : ""}`}
         />
-        <span className="ws-group-color" style={{ background: group.color ?? "var(--dim)" }} />
-        <span className="ws-group-name">{group.name}</span>
+        <button
+          type="button"
+          className="ws-group-color"
+          style={{ background: group.color ?? "var(--dim)" }}
+          title="Change group color"
+          onClick={(e) => {
+            e.stopPropagation();
+            setEditOpen(true);
+          }}
+        />
+        {editingName ? (
+          <input
+            autoFocus
+            className="workspace-rename-input"
+            value={draftName}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setDraftName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                if (draftName.trim()) onRenameGroup(draftName.trim());
+                setEditingName(false);
+              } else if (e.key === "Escape") {
+                setDraftName(group.name);
+                setEditingName(false);
+              }
+            }}
+            onBlur={() => {
+              if (draftName.trim() && draftName !== group.name) onRenameGroup(draftName.trim());
+              setEditingName(false);
+            }}
+          />
+        ) : (
+          <span
+            className="ws-group-name"
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setDraftName(group.name);
+              setEditingName(true);
+            }}
+          >
+            {group.name}
+          </span>
+        )}
         {isAssignTarget && <span className="ws-group-drop-label">drop here</span>}
         <span className="ws-group-count">{workspaces.length}</span>
-        <span onClick={(e) => e.stopPropagation()}>
+        <span className="ws-group-actions" onClick={(e) => e.stopPropagation()}>
+          <ConfirmButton title="Delete group" onConfirm={onDeleteGroup}>
+            <KillIcon size={13} />
+          </ConfirmButton>
           <KebabMenu
             title="More…"
             items={[
@@ -700,6 +652,9 @@ function WorkspaceItem({
       )}
       {liveStatus === "working" && <span className="workspace-working-dot" title="Working" />}
       <span className="workspace-item-actions" onClick={(e) => e.stopPropagation()}>
+        <ConfirmButton title="Delete workspace" onConfirm={onDelete}>
+          <KillIcon size={13} />
+        </ConfirmButton>
         <KebabMenu
           title="More…"
           items={[
