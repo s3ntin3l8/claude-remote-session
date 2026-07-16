@@ -1,14 +1,12 @@
 import fp from "fastify-plugin";
 import type { FastifyInstance } from "fastify";
+import { getStoredSettings } from "../services/settings.js";
 import { PtyManager } from "../services/pty-manager.js";
 import { reconcileExitedSessions } from "../services/session-reconciler.js";
 
-// How often to check every "active" session's systemd scope for a program
-// that exited on its own — see session-reconciler.ts. Not latency-critical
-// (a session sitting "active" for up to this long after it actually exited
-// just means one extra silent-respawn window, the exact pre-existing M2
-// gap this closes), so a fairly relaxed interval is fine.
-const RECONCILE_INTERVAL_MS = 30_000;
+function readReconcileIntervalMs(app: FastifyInstance): number {
+  return getStoredSettings(app.db).sessions.reconcileIntervalSeconds * 1000;
+}
 
 // Decorates app.pty with the session manager (see src/services/pty-manager.ts
 // for what it actually does and why). Attach-clients it spawns are only
@@ -19,18 +17,31 @@ export const ptyPlugin = fp(async (app: FastifyInstance) => {
 
   app.decorate("pty", manager);
 
-  // unref() so this timer alone never keeps the process (or, in tests, a
-  // fastify instance that's about to be closed) alive — reconciliation is
-  // opportunistic housekeeping, not core request-serving work.
-  const reconcileTimer = setInterval(() => {
-    reconcileExitedSessions(app).catch((err) => {
-      app.log.error({ err }, "session reconciliation failed");
-    });
-  }, RECONCILE_INTERVAL_MS);
-  reconcileTimer.unref();
+  let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Re-armable: PATCH /api/settings calls this after a write that changes
+  // sessions.reconcileIntervalSeconds, so the new interval takes effect
+  // immediately rather than only after a process restart.
+  function armReconcileTimer(intervalMs: number) {
+    if (reconcileTimer) clearInterval(reconcileTimer);
+    // unref() so this timer alone never keeps the process (or, in tests, a
+    // fastify instance that's about to be closed) alive — reconciliation is
+    // opportunistic housekeeping, not core request-serving work.
+    reconcileTimer = setInterval(() => {
+      reconcileExitedSessions(app).catch((err) => {
+        app.log.error({ err }, "session reconciliation failed");
+      });
+    }, intervalMs);
+    reconcileTimer.unref();
+  }
+
+  armReconcileTimer(readReconcileIntervalMs(app));
+  app.decorate("reconfigureReconciler", (intervalSeconds: number) => {
+    armReconcileTimer(intervalSeconds * 1000);
+  });
 
   app.addHook("onClose", () => {
-    clearInterval(reconcileTimer);
+    if (reconcileTimer) clearInterval(reconcileTimer);
     manager.killAll();
   });
 });
@@ -38,5 +49,6 @@ export const ptyPlugin = fp(async (app: FastifyInstance) => {
 declare module "fastify" {
   interface FastifyInstance {
     pty: PtyManager;
+    reconfigureReconciler: (intervalSeconds: number) => void;
   }
 }
