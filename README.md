@@ -1,15 +1,29 @@
-# claude-remote-session
+# Tessera
 
-A self-hosted, tiled, persistent browser dashboard for terminals running AI
-coding CLIs (Claude Code, Codex, opencode, ...) on a remote host. Sessions run
-on the host under `dtach`, so closing the browser tab never kills them — the
-dashboard is a thin attach-client, not the process owner.
+A self-hosted, tiled, persistent browser dashboard for host-run AI CLI
+terminals (Claude Code, Codex, opencode, ...). Sessions run on the host under
+`dtach`, so closing the browser tab never kills them — the dashboard is a thin
+attach-client, not the process owner.
 
 Backend: [Fastify](https://fastify.dev/) + TypeScript (ESM) +
 SQLite/[Drizzle](https://orm.drizzle.team/), with security middleware and full
 CI/CD. Frontend: React + [dockview](https://dockview.dev/) (tiled splits/tabs)
 
 - [xterm.js](https://xtermjs.org/).
+
+## ✨ Features
+
+- **Tiled.** A dockview-based split/tab layout turns the browser into mission
+  control for however many terminals you're running at once — drag, split,
+  and save named/grouped workspace layouts instead of juggling browser tabs.
+- **Persistent.** Every session is a host PTY attached via `dtach`, running
+  inside a transient `systemd --user` scope. Sessions survive redeploys,
+  service restarts, and closed browser tabs — the dashboard reattaches to
+  what's already running rather than owning the process.
+- **Mission control.** One dashboard for every host-run AI CLI: a
+  command-palette launcher with official CLI logos, project discovery, a
+  per-project dock, and session status signals (exited detection,
+  activity/attention) so you always know what's running and what needs you.
 
 > **Status:** the backend is feature-complete for projects, durable sessions,
 > named/grouped workspace layouts, project discovery, unified launchers
@@ -130,10 +144,10 @@ Frontend (`frontend/`):
 ## 🐳 Docker
 
 ```bash
-docker build -t claude-remote-session .
+docker build -t tessera .
 docker run -p 3000:3000 \
   -e DB_ENCRYPTION_KEY="$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")" \
-  claude-remote-session
+  tessera
 ```
 
 Multi-stage build: includes `dtach` and builds the frontend into the image,

@@ -76,7 +76,7 @@ export function TerminalPreview({
       >
         <div>
           <span style={{ color: "var(--pg)" }}>➜</span>{" "}
-          <span style={{ color: "var(--pb)" }}>~/cmuxterm-hq</span>{" "}
+          <span style={{ color: "var(--pb)" }}>~/tessera-hq</span>{" "}
           <span style={{ color: "var(--pm)" }}>
             git:(<span style={{ color: "var(--pr)" }}>main</span>)
           </span>{" "}

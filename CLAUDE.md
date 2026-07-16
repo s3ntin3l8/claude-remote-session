@@ -1,4 +1,4 @@
-# CLAUDE.md — claude-remote-session
+# CLAUDE.md — Tessera
 
 A self-hosted, tiled, persistent browser dashboard for host-run AI CLI terminals
 (Claude Code, Codex, opencode, ...), built on a Fastify + TypeScript backend
