@@ -1,3 +1,5 @@
+<img src="frontend/public/logo.svg" width="40" height="40" alt="Tessera logo" align="left" />
+
 # Tessera
 
 A self-hosted, tiled, persistent browser dashboard for host-run AI CLI
