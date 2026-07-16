@@ -10,7 +10,6 @@ import {
   ChevronDownIcon,
   CloseIcon,
   FolderIcon,
-  KillIcon,
   PlusIcon,
   RenameIcon,
   SearchAlertIcon,
@@ -191,7 +190,7 @@ function ProjectSection({
                 key: "delete",
                 label: "Delete project",
                 armLabel: "Click again to delete",
-                icon: <KillIcon size={14} />,
+                icon: <CloseIcon size={14} />,
                 danger: true,
                 confirm: true,
                 onClick: () => {

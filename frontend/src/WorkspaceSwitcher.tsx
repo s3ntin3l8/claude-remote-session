@@ -10,9 +10,9 @@ import type { Group, Session, Workspace } from "./api.js";
 import {
   CheckIcon,
   ChevronDownIcon,
+  CloseIcon,
   GridIcon,
   GripIcon,
-  KillIcon,
   PlusIcon,
   RenameIcon,
 } from "./icons.js";
@@ -360,7 +360,7 @@ function GroupSection({
         <span className="ws-group-count">{workspaces.length}</span>
         <span className="ws-group-actions" onClick={(e) => e.stopPropagation()}>
           <ConfirmButton title="Delete group" onConfirm={onDeleteGroup}>
-            <KillIcon size={13} />
+            <CloseIcon size={13} />
           </ConfirmButton>
           <KebabMenu
             title="More…"
@@ -375,7 +375,7 @@ function GroupSection({
                 key: "delete",
                 label: "Delete group",
                 armLabel: "Click again to delete",
-                icon: <KillIcon size={14} />,
+                icon: <CloseIcon size={14} />,
                 danger: true,
                 confirm: true,
                 onClick: onDeleteGroup,
@@ -653,7 +653,7 @@ function WorkspaceItem({
       {liveStatus === "working" && <span className="workspace-working-dot" title="Working" />}
       <span className="workspace-item-actions" onClick={(e) => e.stopPropagation()}>
         <ConfirmButton title="Delete workspace" onConfirm={onDelete}>
-          <KillIcon size={13} />
+          <CloseIcon size={13} />
         </ConfirmButton>
         <KebabMenu
           title="More…"
@@ -668,7 +668,7 @@ function WorkspaceItem({
               key: "delete",
               label: "Delete workspace",
               armLabel: "Click again to delete",
-              icon: <KillIcon size={14} />,
+              icon: <CloseIcon size={14} />,
               danger: true,
               confirm: true,
               onClick: onDelete,
