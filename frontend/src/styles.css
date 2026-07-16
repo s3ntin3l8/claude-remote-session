@@ -2,7 +2,11 @@
    project (Cmux Redesign.dc.html / Cmux States.dc.html) — see
    .claude/plans/ok-i-m-thinking-of-merry-corbato.md's Phase 4b section and
    /tmp .../scratchpad/cmux-design/tokens.css for the source. Dark is the
-   default; .light on .cmux-root overrides every value below. */
+   default; .light on .cmux-root overrides every value below.
+   --accent-solid / --ring are the one deliberate departure from that source:
+   they've been recolored to Tessera's emerald brand (from the Pocket design
+   system) — everything else here is still the original cmux surface/status
+   palette. */
 .cmux-root {
   --bg: #0a0a0a;
   --chrome: #1c1c1e;
@@ -15,8 +19,8 @@
   --fg: #ededed;
   --muted: #8b8b92;
   --dim: #666670;
-  --accent-solid: #3b6cf5;
-  --ring: #3b82f6;
+  --accent-solid: #0e9f6e;
+  --ring: #12b981;
   --g: #5ec27a;
   --r: #e5575a;
   --b: #5c9bf5;
@@ -42,8 +46,8 @@
   --fg: #171717;
   --muted: #737373;
   --dim: #9a9a9a;
-  --accent-solid: #3b6cf5;
-  --ring: #2563eb;
+  --accent-solid: #0e9f6e;
+  --ring: #0e9f6e;
   --g: #1a7f37;
   --r: #cf222e;
   --b: #0969da;
@@ -1347,6 +1351,10 @@ body {
 .empty-state-icon.warn {
   background: color-mix(in srgb, var(--o) 12%, transparent);
   color: var(--o);
+}
+.empty-state-mark {
+  color: var(--fg);
+  flex-shrink: 0;
 }
 .empty-state-title {
   font-size: 13.5px;

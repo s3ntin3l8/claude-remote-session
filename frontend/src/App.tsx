@@ -509,7 +509,7 @@ export function App() {
           {!backendReachable && (
             <div className="backend-down-banner">
               <ServerRackIcon size={16} style={{ color: "var(--r)" }} />
-              <span className="backend-down-title">cmux server unreachable</span>
+              <span className="backend-down-title">Tessera server unreachable</span>
               <span className="backend-down-subtext">
                 unix socket · retry in {LIVE_REFRESH_INTERVAL_MS / 1000}s…
               </span>

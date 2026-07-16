@@ -20,7 +20,7 @@ export interface TerminalScheme {
 export const TERMINAL_SCHEMES: TerminalScheme[] = [
   {
     id: "default",
-    name: "cmux Dark",
+    name: "Tessera Dark",
     bg: "#0d0d0d",
     fg: "#ededed",
     green: "#5ec27a",

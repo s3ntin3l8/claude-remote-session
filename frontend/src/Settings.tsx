@@ -54,7 +54,7 @@ const SECTIONS: Array<{
   {
     id: "projects",
     title: "Projects & discovery",
-    desc: "Where cmux scans for repositories.",
+    desc: "Where Tessera scans for repositories.",
     icon: (size) => <FolderIcon size={size} />,
   },
   {
@@ -190,7 +190,7 @@ export function Settings({
             </div>
             <div className="settings-nav-footer">
               <span className="settings-nav-footer-badge">
-                {(typeof document !== "undefined" && document.title[0]) || "C"}
+                {(typeof document !== "undefined" && document.title[0]) || "T"}
               </span>
               <span className="settings-nav-footer-text">single-user</span>
             </div>
@@ -221,7 +221,7 @@ function AppearanceSection() {
   const t = settings.terminal;
   return (
     <>
-      <Row label="Theme" desc="cmux is dark-first. System follows your OS." align="start">
+      <Row label="Theme" desc="Tessera is dark-first. System follows your OS." align="start">
         <Segmented
           value={settings.theme}
           onChange={(v) => updateSettings({ theme: v })}
@@ -715,7 +715,7 @@ function SessionsSection() {
             →{" "}
             {s.namePattern
               .replaceAll("{agent}", "Claude Code")
-              .replaceAll("{project}", "cmuxterm-hq")
+              .replaceAll("{project}", "tessera-hq")
               .replaceAll("{n}", "1")}
           </span>
         </div>

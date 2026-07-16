@@ -5,12 +5,12 @@ import { CreateProjectModal } from "./CreateProjectModal.js";
 import { KebabMenu } from "./KebabMenu.js";
 import { api } from "./api.js";
 import type { DiscoveredProject, Project, Session } from "./api.js";
+import { TesseraMark } from "./assets/TesseraMark.js";
 import {
   ChevronDownIcon,
   CloseIcon,
   FolderIcon,
   KillIcon,
-  PlayTriangleIcon,
   PlusIcon,
   RenameIcon,
   SearchAlertIcon,
@@ -39,7 +39,7 @@ export function Sidebar({
     useDashboardStore();
   const [addProjectOpen, setAddProjectOpen] = useState(false);
   // Lifted here (rather than owned entirely inside DiscoverProjects) so the
-  // "Welcome to cmux" empty state's "Scan for repos" button can force it
+  // "Welcome to Tessera" empty state's "Scan for repos" button can force it
   // open, matching the design's two-button first-run CTA.
   const [discoverCollapsed, setDiscoverCollapsed] = useState(false);
 
@@ -64,10 +64,8 @@ export function Sidebar({
       </div>
       {projects.length === 0 ? (
         <div className="empty-state">
-          <span className="empty-state-icon accent">
-            <PlayTriangleIcon size={20} />
-          </span>
-          <div className="empty-state-title">Welcome to cmux</div>
+          <TesseraMark size={32} className="empty-state-mark" />
+          <div className="empty-state-title">Welcome to Tessera</div>
           <div className="empty-state-body">
             Add a project folder to start — sessions run there and survive across restarts.
           </div>
@@ -363,7 +361,7 @@ function DiscoverProjects({
           </span>
           <div className="empty-state-title">No repositories found</div>
           <div className="empty-state-body">
-            cmux scanned your search roots but found no git projects. Point it at a folder that
+            Tessera scanned your search roots but found no git projects. Point it at a folder that
             contains your repos.
           </div>
           <div className="empty-state-actions">

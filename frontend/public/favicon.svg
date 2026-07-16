@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <style>
+    .tile { fill: #11211a; }
+    .accent { fill: #0e9f6e; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #e7ede9; }
+      .accent { fill: #12b981; }
+    }
+  </style>
+  <rect class="tile" x="1" y="1" width="13.5" height="13.5" rx="2" />
+  <rect class="tile" x="17.5" y="1" width="13.5" height="13.5" rx="2" />
+  <rect class="tile" x="1" y="17.5" width="13.5" height="13.5" rx="2" />
+  <rect class="accent" x="17.5" y="17.5" width="13.5" height="13.5" rx="2" />
+</svg>
