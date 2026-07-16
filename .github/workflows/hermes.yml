@@ -1,22 +1,25 @@
 name: Hermes (review)
 
 # Two ways to get a review from the s3ntin3l8-hermes bot:
-#   1. auto-review    -> every non-draft PR, automatically, on open/push.
+#   1. auto-review    -> once, when a non-draft PR is opened.
 #   2. on-demand-review -> comment "@s3ntin3l8-hermes Review" (or "Triage" on
-#      an issue) on a PR/issue at any time.
+#      an issue) any time you want another look -- including every follow-up
+#      after the first auto-review, and for draft PRs marked ready.
 # Both call the same reusable workflow (s3ntin3l8/.github/.github/workflows/
 # hermes-review.yml@main) with a different `mode`, gated by github.event_name
 # so each job only runs for its own trigger.
+#
+# IMPORTANT: auto-review is intentionally `opened` ONLY -- do not add
+# `synchronize` (or `ready_for_review`) back. Each of those re-triggers a
+# fresh review on every subsequent push/transition; on a PR under active
+# iteration that's an unbounded review loop (each review's comments prompt
+# more commits, each commit fires another review...). Confirmed in practice
+# on PR #16: 5 pushes while responding to feedback produced 5 separate
+# Hermes review submissions. One entry point (`opened`) plus on-demand for
+# every deliberate follow-up avoids this by construction.
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review]
-    # `opened`           => review once when a PR is opened.
-    # `synchronize`      => re-review on pushes to the PR. The reusable workflow's
-    # "already reviewed" guard skips repeats, so it effectively re-reviews only
-    # after the prior review is dismissed.
-    # `ready_for_review` => review when a draft PR is marked ready. `opened` on a
-    # draft is skipped below, so without this type a draft->ready PR would only
-    # get its first review on the *next* push, not on the transition itself.
+    types: [opened]
   issue_comment:
     types: [created]
     # Covers both PR-conversation comments and issue comments. The reusable
