@@ -20,3 +20,19 @@ export function isUnreadAttention(session: Session, acked: Record<number, number
   const ackedAt = acked[session.id];
   return ackedAt === undefined || (session.attentionAt ?? 0) > ackedAt;
 }
+
+// Drops acknowledged-attention entries for sessions that no longer exist
+// (deleted, or never seen again by this browser) — otherwise the map, and
+// the localStorage blob store.ts persists it to, would grow by one entry
+// per ever-acknowledged session id for the lifetime of the browser profile.
+export function pruneAckedAttention(
+  acked: Record<number, number>,
+  sessions: Session[],
+): Record<number, number> {
+  const liveIds = new Set(sessions.map((s) => s.id));
+  const pruned: Record<number, number> = {};
+  for (const [id, attentionAt] of Object.entries(acked)) {
+    if (liveIds.has(Number(id))) pruned[Number(id)] = attentionAt;
+  }
+  return pruned;
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isUnreadAttention } from "./attention.js";
+import { isUnreadAttention, pruneAckedAttention } from "./attention.js";
 import type { Session } from "./api.js";
 
 // Minimal fixture matching api.ts's Session shape — only `attention` and
@@ -51,5 +51,23 @@ describe("isUnreadAttention", () => {
   it("treats a null attentionAt as older than any acknowledged timestamp", () => {
     const session = makeSession({ attention: true, attentionAt: null });
     expect(isUnreadAttention(session, { 1: 0 })).toBe(false);
+  });
+});
+
+describe("pruneAckedAttention", () => {
+  it("drops entries for session ids that no longer exist", () => {
+    const acked = { 1: 1000, 2: 2000 };
+    const sessions = [makeSession({ id: 1 })];
+    expect(pruneAckedAttention(acked, sessions)).toEqual({ 1: 1000 });
+  });
+
+  it("keeps entries for every session id still present", () => {
+    const acked = { 1: 1000, 2: 2000 };
+    const sessions = [makeSession({ id: 1 }), makeSession({ id: 2 })];
+    expect(pruneAckedAttention(acked, sessions)).toEqual(acked);
+  });
+
+  it("returns an empty object when no sessions remain", () => {
+    expect(pruneAckedAttention({ 1: 1000 }, [])).toEqual({});
   });
 });

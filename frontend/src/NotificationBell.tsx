@@ -58,6 +58,21 @@ export function NotificationBell({ onOpenSession }: { onOpenSession: (session: S
     return () => document.removeEventListener("mousedown", onOutsideClick);
   }, [open]);
 
+  // The toolbar's mobile breakpoint (styles.css's max-width:699px block)
+  // changes .toolbar-lead's width, so the bell can move under the panel on a
+  // resize/orientation-change while it's open — recompute rather than leave
+  // it anchored to a stale rect.
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => {
+      if (!btnRef.current) return;
+      const rect = btnRef.current.getBoundingClientRect();
+      setPos({ top: rect.bottom + 6, left: rect.left });
+    };
+    window.addEventListener("resize", reposition);
+    return () => window.removeEventListener("resize", reposition);
+  }, [open]);
+
   const unread = sessions
     .filter((s) => isUnreadAttention(s, acknowledgedAttention))
     .sort((a, b) => (b.attentionAt ?? 0) - (a.attentionAt ?? 0));
@@ -71,6 +86,13 @@ export function NotificationBell({ onOpenSession }: { onOpenSession: (session: S
           unread.length > 0
             ? `Attention — ${unread.length} session${unread.length === 1 ? "" : "s"} need input`
             : "No sessions need attention"
+        }
+        aria-haspopup="true"
+        aria-expanded={open}
+        aria-label={
+          unread.length > 0
+            ? `Notifications, ${unread.length} unread`
+            : "Notifications, none unread"
         }
         onClick={(e) => {
           e.stopPropagation();
@@ -111,24 +133,23 @@ export function NotificationBell({ onOpenSession }: { onOpenSession: (session: S
             ) : (
               unread.map((session) => {
                 const project = projects.find((p) => p.id === session.projectId);
+                const title = session.name || session.command;
+                const subtitle = `${project?.name ?? "Unknown project"}${session.lastTitle ? ` · ${session.lastTitle}` : ""}`;
+                const age = session.attentionAt ? formatRelativeAge(session.attentionAt) : "";
                 return (
                   <button
                     key={session.id}
                     className="notif-row"
+                    aria-label={`${title} — ${subtitle}${age ? ` — ${age}` : ""}`}
                     onClick={() => {
                       acknowledgeAttention(session.id);
                       setOpen(false);
                       onOpenSession(session);
                     }}
                   >
-                    <span className="notif-row-title">{session.name || session.command}</span>
-                    <span className="notif-row-subtitle">
-                      {project?.name ?? "Unknown project"}
-                      {session.lastTitle ? ` · ${session.lastTitle}` : ""}
-                    </span>
-                    <span className="notif-row-time">
-                      {session.attentionAt ? formatRelativeAge(session.attentionAt) : ""}
-                    </span>
+                    <span className="notif-row-title">{title}</span>
+                    <span className="notif-row-subtitle">{subtitle}</span>
+                    <span className="notif-row-time">{age}</span>
                   </button>
                 );
               })

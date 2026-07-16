@@ -11,7 +11,7 @@ import type {
 } from "./api.js";
 import type { PositionUpdate, ReorderUpdate } from "./reorder.js";
 import { deepMerge, mergePartialPatch } from "./settingsMerge.js";
-import { isUnreadAttention } from "./attention.js";
+import { isUnreadAttention, pruneAckedAttention } from "./attention.js";
 
 // Which workspace was last active survives a reload via localStorage (not
 // the DB — it's a per-browser UI preference, not shared server state).
@@ -79,9 +79,10 @@ function readStoredAckedAttention(): Record<number, number> {
 }
 
 // Re-exported for existing consumers that import it alongside the store
-// (NotificationBell.tsx) — the actual definition lives in attention.ts so it
-// stays importable in the frontend's node-environment vitest tests without
-// pulling in this module's localStorage-touching creation side effects.
+// (NotificationBell.tsx) — the actual definitions live in attention.ts so
+// they stay importable in the frontend's node-environment vitest tests
+// without pulling in this module's localStorage-touching creation side
+// effects.
 export { isUnreadAttention };
 
 // The *resolved* theme — what's actually painted (dockview class, root
@@ -477,20 +478,24 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
     },
 
     acknowledgeAttention: (sessionId) => {
-      const session = get().sessions.find((s) => s.id === sessionId);
-      const next = {
-        ...get().acknowledgedAttention,
-        [sessionId]: session?.attentionAt ?? Date.now(),
-      };
+      const sessions = get().sessions;
+      const session = sessions.find((s) => s.id === sessionId);
+      const next = pruneAckedAttention(
+        { ...get().acknowledgedAttention, [sessionId]: session?.attentionAt ?? Date.now() },
+        sessions,
+      );
       localStorage.setItem(ACKED_ATTENTION_KEY, JSON.stringify(next));
       set({ acknowledgedAttention: next });
     },
 
     acknowledgeAllAttention: () => {
-      const next = { ...get().acknowledgedAttention };
-      for (const session of get().sessions) {
-        if (isUnreadAttention(session, next)) next[session.id] = session.attentionAt ?? Date.now();
+      const sessions = get().sessions;
+      const merged = { ...get().acknowledgedAttention };
+      for (const session of sessions) {
+        if (isUnreadAttention(session, merged))
+          merged[session.id] = session.attentionAt ?? Date.now();
       }
+      const next = pruneAckedAttention(merged, sessions);
       localStorage.setItem(ACKED_ATTENTION_KEY, JSON.stringify(next));
       set({ acknowledgedAttention: next });
     },
