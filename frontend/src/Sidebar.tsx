@@ -10,12 +10,10 @@ import {
   ChevronDownIcon,
   CloseIcon,
   FolderIcon,
-  KillIcon,
   PlusIcon,
   RenameIcon,
   SearchAlertIcon,
   SearchIcon,
-  TerminalPromptIcon,
 } from "./icons.js";
 
 interface SidebarProps {
@@ -140,14 +138,24 @@ function ProjectSection({
   onOpenLauncher: () => void;
 }) {
   const { deleteProject, deleteSession, updateProject } = useDashboardStore();
-  const [collapsed, setCollapsed] = useState(false);
+  // `manualCollapsed` is null until the user explicitly toggles — until then,
+  // collapsed state is *derived* from whether the project has sessions
+  // (empty projects start collapsed). A plain `useState(sessions.length ===
+  // 0)` would be wrong here: projects and sessions load via independent
+  // effects (see Sidebar's own refreshProjects/refreshSessions above), so a
+  // project can mount with `sessions === []` before its sessions have
+  // arrived, permanently collapsing an otherwise-active project. Deriving
+  // instead means it stays reactive to that data landing, and "sticks" once
+  // the user has an opinion.
+  const [manualCollapsed, setManualCollapsed] = useState<boolean | null>(null);
+  const collapsed = manualCollapsed ?? sessions.length === 0;
   const [editOpen, setEditOpen] = useState(false);
 
   const attentionCount = sessions.filter((s) => s.attention).length;
 
   return (
     <div className="project-row">
-      <div className="project-row-header" onClick={() => setCollapsed((v) => !v)}>
+      <div className="project-row-header" onClick={() => setManualCollapsed(!collapsed)}>
         <ChevronDownIcon
           size={12}
           className={collapsed ? "ws-group-chevron collapsed" : "ws-group-chevron"}
@@ -182,7 +190,7 @@ function ProjectSection({
                 key: "delete",
                 label: "Delete project",
                 armLabel: "Click again to delete",
-                icon: <KillIcon size={14} />,
+                icon: <CloseIcon size={14} />,
                 danger: true,
                 confirm: true,
                 onClick: () => {
@@ -209,21 +217,7 @@ function ProjectSection({
       {!collapsed && (
         <div className="project-row-body">
           {sessions.length === 0 ? (
-            <div className="empty-state">
-              <span className="empty-state-icon neutral">
-                <TerminalPromptIcon size={17} />
-              </span>
-              <div className="empty-state-title">
-                No sessions in{" "}
-                <span style={{ fontFamily: "'Geist Mono', monospace" }}>{project.name}</span>
-              </div>
-              <div className="empty-state-body">Launch a shell or an AI agent to get going.</div>
-              <div className="empty-state-actions">
-                <button className="empty-state-btn-secondary" onClick={onOpenLauncher}>
-                  New session <span className="kbd">⌘K</span>
-                </button>
-              </div>
-            </div>
+            <div className="project-empty-note">No sessions yet</div>
           ) : (
             sessions.map((session) => (
               <SessionRow

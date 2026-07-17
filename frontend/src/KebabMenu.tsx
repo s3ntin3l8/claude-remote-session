@@ -20,6 +20,7 @@ import { OverflowIcon } from "./icons.js";
 // PaneTab.tsx itself is deliberately NOT migrated to this component this
 // pass — it already works, no reason to churn it.
 const ARM_MS = 3000;
+const ARM_SECONDS = ARM_MS / 1000;
 
 export interface KebabMenuItem {
   key: string;
@@ -41,13 +42,28 @@ export function KebabMenu({ items, title = "More…" }: { items: KebabMenuItem[]
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
   const [armedKey, setArmedKey] = useState<string | null>(null);
-  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Ticks 3 -> 2 -> 1 in the "3s"-style hint below rather than sitting static
+  // for the whole arm window — a countdown that doesn't move reads as stuck.
+  const [armSecondsLeft, setArmSecondsLeft] = useState(ARM_SECONDS);
+  // Mirrors armSecondsLeft so the interval callback below can branch on the
+  // current count without reaching into a setState updater — calling
+  // setArmedKey/clearInterval (side effects) from inside a setArmSecondsLeft
+  // updater function is impure and can warn under StrictMode.
+  const armSecondsRef = useRef(ARM_SECONDS);
+  const armIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
+  const clearArmTimer = () => {
+    if (armIntervalRef.current) {
+      clearInterval(armIntervalRef.current);
+      armIntervalRef.current = null;
+    }
+  };
+
   useEffect(
     () => () => {
-      if (armTimer.current) clearTimeout(armTimer.current);
+      if (armIntervalRef.current) clearInterval(armIntervalRef.current);
     },
     [],
   );
@@ -58,6 +74,7 @@ export function KebabMenu({ items, title = "More…" }: { items: KebabMenuItem[]
       const target = e.target as Node;
       if (btnRef.current?.contains(target)) return;
       if (menuRef.current?.contains(target)) return;
+      clearArmTimer();
       setOpen(false);
       setArmedKey(null);
     };
@@ -69,14 +86,25 @@ export function KebabMenu({ items, title = "More…" }: { items: KebabMenuItem[]
     if (item.disabled) return;
     if (item.confirm) {
       if (armedKey === item.key) {
-        if (armTimer.current) clearTimeout(armTimer.current);
+        clearArmTimer();
         setArmedKey(null);
         setOpen(false);
         item.onClick();
       } else {
+        clearArmTimer();
         setArmedKey(item.key);
-        if (armTimer.current) clearTimeout(armTimer.current);
-        armTimer.current = setTimeout(() => setArmedKey(null), ARM_MS);
+        armSecondsRef.current = ARM_SECONDS;
+        setArmSecondsLeft(ARM_SECONDS);
+        armIntervalRef.current = setInterval(() => {
+          armSecondsRef.current -= 1;
+          if (armSecondsRef.current <= 0) {
+            clearArmTimer();
+            setArmedKey(null);
+            setArmSecondsLeft(ARM_SECONDS);
+          } else {
+            setArmSecondsLeft(armSecondsRef.current);
+          }
+        }, 1000);
       }
       return;
     }
@@ -97,6 +125,7 @@ export function KebabMenu({ items, title = "More…" }: { items: KebabMenuItem[]
             setPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
           }
           setOpen((v) => !v);
+          clearArmTimer();
           setArmedKey(null);
         }}
       >
@@ -126,7 +155,7 @@ export function KebabMenu({ items, title = "More…" }: { items: KebabMenuItem[]
                 </span>
                 {armedKey === item.key && (
                   <span className="pane-tab-overflow-hint" style={{ color: "var(--o)" }}>
-                    3s
+                    {armSecondsLeft}s
                   </span>
                 )}
               </button>

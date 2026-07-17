@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { CheckIcon } from "./icons.js";
 
 // A native window.confirm() blocks the entire tab (including our own WS
 // connections and any automated testing) until dismissed, and looks jarring
@@ -29,6 +30,7 @@ export function ConfirmButton({
 
   return (
     <button
+      type="button"
       className={`danger${armed ? " armed" : ""}`}
       title={armed ? "Click again to confirm" : title}
       onClick={() => {
@@ -40,7 +42,7 @@ export function ConfirmButton({
         }
       }}
     >
-      {armed ? "confirm?" : children}
+      {armed ? <CheckIcon size={13} /> : children}
     </button>
   );
 }
