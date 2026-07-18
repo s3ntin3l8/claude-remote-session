@@ -1420,6 +1420,37 @@ body {
   color: var(--dim);
   flex-shrink: 0;
 }
+/* Compact per-project browser-preview row (issue #28) — same shape as
+   .dock-github-row above, opens BrowserPanel.tsx on click. Absent entirely
+   when the project has no devServerUrl configured — see Dock.tsx. */
+.dock-browser-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 8px;
+  margin: 0 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+.dock-browser-row:hover {
+  border-color: var(--muted);
+  color: var(--fg);
+}
+.dock-browser-url {
+  font-size: 11.5px;
+  font-family: "Geist Mono", monospace;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
 .dock-body {
   flex: 1;
   display: flex;
@@ -1693,6 +1724,61 @@ body {
 }
 .github-panel-ci-dot.pending {
   background: var(--o);
+}
+
+/* Browser preview panel (BrowserPanel.tsx, issue #28) — a dockview panel
+   embedding a project's proxied dev server, opened from the Dock's own row
+   or CommandPalette's Integrations entry, same as the GitHub panel above. */
+.browser-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.browser-panel-empty {
+  padding: 20px 16px;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.browser-panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.browser-panel-url {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Geist Mono", monospace;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.browser-panel-reload {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.browser-panel-reload:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+.browser-panel-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
 }
 
 /* ============================================================ */

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "./api.js";
 import type { DockControl, GitHubStatus } from "./api.js";
 import { useDashboardStore } from "./store.js";
-import { ChevronDownIcon, DockIcon, GitHubIcon, PlusIcon } from "./icons.js";
+import { ChevronDownIcon, DockIcon, GitHubIcon, GlobeIcon, PlusIcon } from "./icons.js";
 import { TerminalPane } from "./TerminalPane.js";
 
 const DOCK_COLLAPSED_KEY = "crs.dockCollapsed";
@@ -26,9 +26,15 @@ function ciDotClass(status: "success" | "failure" | "in_progress"): "good" | "ba
 export function Dock({
   projectId,
   onOpenGitHub,
+  onOpenBrowser,
 }: {
   projectId: number | null;
   onOpenGitHub: (projectId: number) => void;
+  // Issue #28 — same "glance row opens the fuller panel" shape as
+  // onOpenGitHub above, but gated on the project having a devServerUrl
+  // configured (see the row below) rather than a fetched status, since
+  // there's no server round-trip needed to know whether it's applicable.
+  onOpenBrowser: (projectId: number) => void;
 }) {
   const { projects, sessions, createSession, deleteSession } = useDashboardStore();
   const [controls, setControls] = useState<DockControl[]>([]);
@@ -170,6 +176,16 @@ export function Dock({
               title={`CI: ${githubStatus.ciStatus}`}
             />
           )}
+        </button>
+      )}
+      {!collapsed && dockProjectId !== null && project?.devServerUrl && (
+        <button
+          className="dock-browser-row"
+          onClick={() => onOpenBrowser(dockProjectId)}
+          title={`Open browser preview for ${project.devServerUrl}`}
+        >
+          <GlobeIcon size={13} />
+          <span className="dock-browser-url">{project.devServerUrl}</span>
         </button>
       )}
       {!collapsed && (

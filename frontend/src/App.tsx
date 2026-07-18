@@ -8,6 +8,8 @@ import { TerminalPane } from "./TerminalPane.js";
 import type { TerminalPaneParams } from "./TerminalPane.js";
 import { GitHubPanel } from "./GitHubPanel.js";
 import type { GitHubPanelParams } from "./GitHubPanel.js";
+import { BrowserPanel } from "./BrowserPanel.js";
+import type { BrowserPanelParams } from "./BrowserPanel.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { Toolbar } from "./Toolbar.js";
 import { PaneTab } from "./PaneTab.js";
@@ -48,16 +50,29 @@ function GitHubPanelWrapper(props: IDockviewPanelProps<GitHubPanelParams>) {
   );
 }
 
+// Same reasoning as GitHubPanelWrapper above — a crashing iframe/preview
+// fetch shouldn't blank the whole dashboard either.
+function BrowserPanelWrapper(props: IDockviewPanelProps<BrowserPanelParams>) {
+  const [resetKey, setResetKey] = useState(0);
+  return (
+    <ErrorBoundary onReset={() => setResetKey((k) => k + 1)}>
+      <BrowserPanel key={resetKey} params={props.params} />
+    </ErrorBoundary>
+  );
+}
+
 const components = {
   terminal: TerminalPanelWrapper,
   github: GitHubPanelWrapper,
+  browser: BrowserPanelWrapper,
 };
 
 // The custom tab component (PaneTab) carries the redesign's most important
 // distinction — close-pane (detach) vs. kill-session (guarded, ends the
-// program) — so it only applies to "terminal" panels; "github" has no
-// session to kill, so it falls back to dockview's own default tab (title +
-// plain close), same as this repo's other non-terminal panel types would.
+// program) — so it only applies to "terminal" panels; "github"/"browser"
+// have no session to kill, so they fall back to dockview's own default tab
+// (title + plain close), same as this repo's other non-terminal panel
+// types would.
 const tabComponents = { terminal: PaneTab };
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
@@ -437,6 +452,35 @@ export function App() {
     [dockviewApi, projects, isMobile],
   );
 
+  // Opens (or focuses) a browser preview pane for a project's dev server
+  // (issue #28) — same open-or-focus-by-stable-id shape as onOpenGitHub
+  // above. BrowserPanel itself resolves/creates the preview and handles the
+  // "not configured"/"not enabled" states, so this handler doesn't need to
+  // pre-check anything (see BrowserPanel.tsx's own comment on why params
+  // only ever need to carry projectId).
+  const onOpenBrowser = useCallback(
+    (projectId: number) => {
+      if (!dockviewApi) return;
+      const project = projects.find((p) => p.id === projectId);
+      const panelId = `browser-${projectId}`;
+      const existing = dockviewApi.getPanel(panelId);
+      if (existing) {
+        existing.api.setActive();
+        if (isMobile) dockviewApi.maximizeGroup(existing);
+      } else {
+        const panel = dockviewApi.addPanel({
+          id: panelId,
+          component: "browser",
+          title: project ? `Preview: ${project.name}` : "Preview",
+          params: { projectId },
+        });
+        if (isMobile) dockviewApi.maximizeGroup(panel);
+      }
+      setSidebarOpen(false);
+    },
+    [dockviewApi, projects, isMobile],
+  );
+
   const openGlobalLauncher = useCallback(() => {
     setPalette({ open: true, scope: "global", projectId: null });
   }, []);
@@ -619,7 +663,11 @@ export function App() {
                 </div>
               )}
             </div>
-            <Dock projectId={defaultDockProjectId} onOpenGitHub={onOpenGitHub} />
+            <Dock
+              projectId={defaultDockProjectId}
+              onOpenGitHub={onOpenGitHub}
+              onOpenBrowser={onOpenBrowser}
+            />
           </div>
         </div>
       </div>
@@ -633,6 +681,7 @@ export function App() {
           }}
           onLaunched={handleLaunched}
           onOpenGitHub={onOpenGitHub}
+          onOpenBrowser={onOpenBrowser}
           onOpenIntegrationsSettings={() => openSettings("integrations")}
         />
       )}

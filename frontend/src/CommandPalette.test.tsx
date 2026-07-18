@@ -48,12 +48,32 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={onOpenGitHub}
+        onOpenBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
     );
 
     await user.click(await screen.findByText(/GitHub: tessera/));
     expect(onOpenGitHub).toHaveBeenCalledWith(PROJECT.id);
+  });
+
+  it("opens the browser preview panel for the current project", async () => {
+    const onOpenBrowser = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <CommandPalette
+        scope="project"
+        projectId={PROJECT.id}
+        onClose={vi.fn()}
+        onLaunched={vi.fn()}
+        onOpenGitHub={vi.fn()}
+        onOpenBrowser={onOpenBrowser}
+        onOpenIntegrationsSettings={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByText(/Preview: tessera/));
+    expect(onOpenBrowser).toHaveBeenCalledWith(PROJECT.id);
   });
 
   it("opens Settings -> Integrations", async () => {
@@ -66,6 +86,7 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
+        onOpenBrowser={vi.fn()}
         onOpenIntegrationsSettings={onOpenIntegrationsSettings}
       />,
     );
@@ -83,6 +104,7 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
+        onOpenBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
     );
