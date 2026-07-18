@@ -5,6 +5,11 @@ import {
   InvalidTokenError,
   setPat,
 } from "../services/github-integration.js";
+import {
+  DeviceFlowError,
+  getDeviceFlowStatus,
+  startDeviceFlow,
+} from "../services/github-device-flow.js";
 
 interface SetTokenBody {
   token: string;
@@ -58,5 +63,35 @@ export async function integrationsRoute(app: FastifyInstance) {
   app.delete("/api/integrations/github", async (_request, reply) => {
     disconnect(app);
     reply.code(204);
+  });
+
+  // Kicks off the device authorization grant (Phase 4) — 400s when no
+  // GitHub OAuth App client id is configured, same "not available" signal
+  // getIntegration()'s deviceFlowAvailable already tells the frontend to
+  // hide the button for. Rate-limited like the PAT route above (also
+  // reaches out to github.com).
+  app.post(
+    "/api/integrations/github/device/start",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (_request, reply) => {
+      try {
+        return await startDeviceFlow(app);
+      } catch (err) {
+        if (err instanceof DeviceFlowError) {
+          return reply.badRequest(err.message);
+        }
+        throw err;
+      }
+    },
+  );
+
+  // Polled by the frontend purely to refresh its own UI — decoupled from
+  // the actual GitHub polling cadence, which github-device-flow.ts drives
+  // on its own schedule server-side. 404 means no attempt is in progress
+  // (never started, or already connected/expired and superseded).
+  app.get("/api/integrations/github/device/status", async (_request, reply) => {
+    const status = getDeviceFlowStatus();
+    if (!status) return reply.notFound();
+    return status;
   });
 }

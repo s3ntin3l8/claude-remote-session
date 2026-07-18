@@ -3,6 +3,7 @@ import { useDashboardStore } from "./store.js";
 import { api, ApiError, LOCAL_HOST_ID } from "./api.js";
 import type { Agent, GitHubIntegration, Host, ServerInfo, SoundName } from "./api.js";
 import { CreateHostModal } from "./CreateHostModal.js";
+import { GitHubDeviceFlowModal } from "./GitHubDeviceFlowModal.js";
 import { KebabMenu } from "./KebabMenu.js";
 import {
   AppearanceIcon,
@@ -981,6 +982,7 @@ function IntegrationsSection() {
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deviceFlowOpen, setDeviceFlowOpen] = useState(false);
 
   useEffect(() => {
     api
@@ -1044,6 +1046,14 @@ function IntegrationsSection() {
         />
       </StyledList>
 
+      {!integration?.connected && integration?.deviceFlowAvailable && (
+        <div style={{ marginTop: 10 }}>
+          <SecondaryButton onClick={() => setDeviceFlowOpen(true)} icon={<GitHubIcon size={13} />}>
+            Connect with GitHub
+          </SecondaryButton>
+        </div>
+      )}
+
       {!integration?.connected && (
         <div style={{ marginTop: 10 }}>
           <Row
@@ -1084,6 +1094,19 @@ function IntegrationsSection() {
           "Connect with GitHub" (device flow, no PAT needed) becomes available once this server is
           configured with a GitHub OAuth App client id.
         </div>
+      )}
+
+      {deviceFlowOpen && (
+        <GitHubDeviceFlowModal
+          onClose={() => setDeviceFlowOpen(false)}
+          onConnected={() => {
+            api
+              .getGitHubIntegration()
+              .then(setIntegration)
+              .catch(() => {});
+            setDeviceFlowOpen(false);
+          }}
+        />
       )}
     </>
   );

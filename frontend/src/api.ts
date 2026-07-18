@@ -35,6 +35,18 @@ export interface GitHubIntegration {
   deviceFlowAvailable: boolean;
 }
 
+// Mirrors src/services/github-device-flow.ts's DeviceFlowSummary 1:1 — never
+// carries the device_code, only what the user needs to see (the
+// user_code/verification_uri) and the current status.
+export type DeviceFlowState = "pending" | "connected" | "expired" | "denied" | "error";
+
+export interface DeviceFlowStatus {
+  status: DeviceFlowState;
+  userCode: string;
+  verificationUri: string;
+  errorMessage?: string;
+}
+
 export interface Session {
   id: number;
   projectId: number;
@@ -452,4 +464,10 @@ export const api = {
     }),
 
   disconnectGitHub: () => request<void>("/api/integrations/github", { method: "DELETE" }),
+
+  startGitHubDeviceFlow: () =>
+    request<DeviceFlowStatus>("/api/integrations/github/device/start", { method: "POST" }),
+
+  getGitHubDeviceFlowStatus: () =>
+    request<DeviceFlowStatus>("/api/integrations/github/device/status"),
 };

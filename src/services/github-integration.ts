@@ -128,11 +128,17 @@ async function validateToken(token: string): Promise<GitHubUserValidation> {
   return { login: body.login, scopes };
 }
 
-export async function setPat(
+// Shared by setPat and setOAuthToken (Phase 4's device flow) — both end up
+// with a validated token and just differ in `tokenType` and (for PAT) in
+// having validated it themselves vs. (for OAuth) GitHub's own token
+// exchange already having done so.
+function storeToken(
   app: FastifyInstance,
   token: string,
-): Promise<GitHubIntegrationSummary> {
-  const { login, scopes } = await validateToken(token);
+  tokenType: "pat" | "oauth",
+  login: string,
+  scopes: string[],
+): GitHubIntegrationSummary {
   const connectedAt = new Date();
   // Encrypted once and reused below (Hermes review, PR #38) — encrypting
   // twice was harmless today, but would silently diverge the insert vs.
@@ -144,7 +150,7 @@ export async function setPat(
     .values({
       provider: GITHUB_PROVIDER,
       authTokenEnc,
-      tokenType: "pat",
+      tokenType,
       login,
       scopes: scopes.join(","),
       connectedAt,
@@ -153,7 +159,7 @@ export async function setPat(
       target: integrations.provider,
       set: {
         authTokenEnc,
-        tokenType: "pat",
+        tokenType,
         login,
         scopes: scopes.join(","),
         connectedAt,
@@ -161,6 +167,26 @@ export async function setPat(
     })
     .run();
   return getIntegration(app);
+}
+
+export async function setPat(
+  app: FastifyInstance,
+  token: string,
+): Promise<GitHubIntegrationSummary> {
+  const { login, scopes } = await validateToken(token);
+  return storeToken(app, token, "pat", login, scopes);
+}
+
+/** Persists a token GitHub's own device-flow token exchange already handed
+ * back as valid (github-device-flow.ts) — still resolves login/scopes via
+ * the same GET /user call setPat uses, but skips re-validating a token
+ * GitHub itself just issued a moment ago. */
+export async function setOAuthToken(
+  app: FastifyInstance,
+  token: string,
+): Promise<GitHubIntegrationSummary> {
+  const { login, scopes } = await validateToken(token);
+  return storeToken(app, token, "oauth", login, scopes);
 }
 
 export function disconnect(app: FastifyInstance): void {
