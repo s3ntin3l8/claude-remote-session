@@ -1,0 +1,327 @@
+import type { FastifyInstance } from "fastify";
+import crypto from "node:crypto";
+import path from "node:path";
+import {
+  discoverCandidates,
+  expandHome,
+  parseProjectsRootsEnv,
+  resolveProjectActions,
+  resolveProjectDock,
+} from "../services/project-config.js";
+import { getCachedAgents } from "../services/agent-detect.js";
+import { resolveGlobalPresets } from "./actions.js";
+import { attachSocketToSession } from "./terminal.js";
+import type { SessionInfo } from "../services/pty-manager.js";
+
+interface SpawnSessionBody {
+  id: string;
+  cwd: string;
+  command: string;
+  cols: number;
+  rows: number;
+}
+
+interface LiveStatusBody {
+  ids: string[];
+  idleThresholdMs: number;
+}
+
+interface LivenessBody {
+  ids: string[];
+}
+
+// A session id is always the primary's stringified integer row id
+// (String(sessionId) — see terminal.ts/sessions.ts) by construction, but
+// this schema is the agent's only defense against a malformed one: it flows
+// straight into pty-manager.ts's scopeUnitName(id) -> `crs-session-<id>`,
+// naming a real systemd --user scope and dtach socket file. An id with
+// systemd- or filesystem-illegal characters (e.g. "/") wouldn't be an
+// injection (spawn/stop always use an argv array, never a shell string),
+// but would make bootstrap/terminate silently target the wrong unit/file.
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const SESSION_ID_SCHEMA = {
+  type: "string",
+  minLength: 1,
+  pattern: SESSION_ID_PATTERN.source,
+} as const;
+
+const spawnSessionSchema = {
+  body: {
+    type: "object",
+    required: ["id", "cwd", "command", "cols", "rows"],
+    additionalProperties: false,
+    properties: {
+      id: SESSION_ID_SCHEMA,
+      cwd: { type: "string", minLength: 1 },
+      command: { type: "string", minLength: 1 },
+      cols: { type: "integer", minimum: 1 },
+      rows: { type: "integer", minimum: 1 },
+    },
+  },
+};
+
+const liveStatusSchema = {
+  body: {
+    type: "object",
+    required: ["ids", "idleThresholdMs"],
+    additionalProperties: false,
+    properties: {
+      ids: { type: "array", items: SESSION_ID_SCHEMA },
+      idleThresholdMs: { type: "integer", minimum: 0 },
+    },
+  },
+};
+
+const livenessSchema = {
+  body: {
+    type: "object",
+    required: ["ids"],
+    additionalProperties: false,
+    properties: {
+      ids: { type: "array", items: SESSION_ID_SCHEMA },
+    },
+  },
+};
+
+const terminateSchema = {
+  params: {
+    type: "object",
+    required: ["id"],
+    properties: {
+      id: SESSION_ID_SCHEMA,
+    },
+  },
+};
+
+// Not a public rate limit exemption — a distinct, higher ceiling. A primary
+// polling this agent's bulk live-status/liveness endpoints at the reconcile
+// cadence (a follow-up PR) is legitimate, frequent traffic from a single
+// caller, unlike the public-facing default (security.ts's RATE_LIMIT_MAX,
+// tuned for a browser). Still bounded, since the token alone doesn't prove
+// the caller is well-behaved.
+const INTERNAL_RATE_LIMIT = { config: { rateLimit: { max: 1000, timeWindow: "1 minute" } } };
+
+/** Constant-time token compare — crypto.timingSafeEqual throws on unequal
+ * lengths, so the length check that guards it is an unavoidable, accepted
+ * side channel (the token's length, not its content) for a long random
+ * shared secret; see src/plugins/env.ts's TESSERA_AGENT_TOKEN doc. */
+function timingSafeTokenMatch(provided: string, expected: string): boolean {
+  if (provided.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+}
+
+/**
+ * Constrain a request-supplied cwd to this agent's own PROJECTS_ROOTS before
+ * it reaches a filesystem read — the sole trust anchor a DB-less agent has,
+ * and the same scope /internal/discover already surfaces. Returns the
+ * resolved absolute path when `cwd` is one of (or a descendant of) a
+ * configured root, else null. Without this, /internal/actions and
+ * /internal/dock would read whatever `.crs/actions.json`/`.crs/dock.json`/
+ * `package.json`/`.vscode/tasks.json` happens to exist at ANY path the
+ * caller names — flagged by CodeQL as uncontrolled data in a path
+ * expression (and, downstream, a log-injection sink in project-config.ts's
+ * warn() calls) once these routes started passing a raw request query
+ * param into project-config.ts's file reads.
+ *
+ * Deliberately NOT applied to /internal/sessions or /internal/ws/attach
+ * (session spawn/attach) below: a session's cwd is the whole point of the
+ * feature and, like the primary's own unrestricted POST /api/projects cwd,
+ * isn't scoped to PROJECTS_ROOTS today — spawning a program is already
+ * fully gated by the shared token, the same trust boundary a roots check
+ * here wouldn't add anything to. This is a deliberate, narrower scope than
+ * "every cwd-accepting route," not an oversight.
+ */
+function resolveWithinRoots(app: FastifyInstance, cwd: string): string | null {
+  const resolved = path.resolve(expandHome(cwd));
+  const roots = parseProjectsRootsEnv(app.config.PROJECTS_ROOTS).map((root) => path.resolve(root));
+  const withinRoots = roots.some(
+    (root) => resolved === root || resolved.startsWith(root + path.sep),
+  );
+  return withinRoots ? resolved : null;
+}
+
+/**
+ * The token-gated API a DB-less "agent" role (issue #26) exposes to a
+ * primary: project discovery, actions/dock resolution, agent detection, and
+ * PTY spawn/attach/terminate/liveness — all scoped to this host's own
+ * filesystem and app.pty, with no DB anywhere in this module. Only
+ * registered when TESSERA_ROLE=agent (see src/app.ts).
+ */
+export async function internalRoutes(app: FastifyInstance) {
+  // Every route below — including the /internal/ws/attach WS upgrade, since
+  // onRequest fires before that upgrade completes (the same guarantee
+  // terminal.ts's own preValidation relies on for session-status gating) —
+  // requires TESSERA_AGENT_TOKEN as a bearer token. This hook is registered
+  // in this plugin's own encapsulated context (not via fastify-plugin), so
+  // it stays scoped to /internal/* and never leaks onto /health or anything
+  // else registered outside this file.
+  app.addHook("onRequest", async (request, reply) => {
+    const header = request.headers.authorization;
+    const provided = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    if (!timingSafeTokenMatch(provided, app.config.TESSERA_AGENT_TOKEN)) {
+      return reply.unauthorized("invalid or missing agent token");
+    }
+  });
+
+  // This agent's own PROJECTS_ROOTS, always read straight from env — unlike
+  // the primary's resolveProjectRoots (routes/projects.ts), there's no
+  // Settings override to check since an agent has no DB.
+  app.get("/internal/discover", INTERNAL_RATE_LIMIT, async () => {
+    return discoverCandidates(parseProjectsRootsEnv(app.config.PROJECTS_ROOTS));
+  });
+
+  // resolveGlobalPresets (actions.ts) reads app.config.CRS_CONFIG_DIR and
+  // calls getCachedAgents() — both already mean "this host's own" on an
+  // agent process, exactly the reason this can't be computed on the primary
+  // side instead (a remote box can have a different set of installed CLIs
+  // than the primary — see the design plan).
+  app.get<{ Querystring: { cwd?: string } }>(
+    "/internal/actions",
+    INTERNAL_RATE_LIMIT,
+    async (request, reply) => {
+      const { cwd } = request.query;
+      if (!cwd) return reply.badRequest("cwd query param is required");
+      const resolvedCwd = resolveWithinRoots(app, cwd);
+      if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
+      const globalPresets = await resolveGlobalPresets(app);
+      return resolveProjectActions(resolvedCwd, globalPresets);
+    },
+  );
+
+  app.get<{ Querystring: { cwd?: string } }>(
+    "/internal/dock",
+    INTERNAL_RATE_LIMIT,
+    async (request, reply) => {
+      const { cwd } = request.query;
+      if (!cwd) return reply.badRequest("cwd query param is required");
+      const resolvedCwd = resolveWithinRoots(app, cwd);
+      if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
+      return resolveProjectDock(resolvedCwd, app.config.CRS_CONFIG_DIR);
+    },
+  );
+
+  app.get("/internal/agents", INTERNAL_RATE_LIMIT, async () => {
+    return getCachedAgents();
+  });
+
+  // Mirrors POST /api/sessions' "create the row and spawn immediately" — an
+  // agent has no row to create, just the spawn half. Idempotent the same way
+  // app.pty.getOrCreate always is: calling this again for an id already
+  // tracked in this process's memory is a no-op beyond respawning a dead
+  // attach-client, same as a fresh /internal/ws/attach would do.
+  app.post<{ Body: SpawnSessionBody }>(
+    "/internal/sessions",
+    { ...INTERNAL_RATE_LIMIT, schema: spawnSessionSchema },
+    async (request, reply) => {
+      const { id, cwd, command, cols, rows } = request.body;
+      app.pty.getOrCreate({ id, cwd: expandHome(cwd), command, cols, rows });
+      reply.code(201);
+      return { ok: true };
+    },
+  );
+
+  // Bulk live status for a batch of ids — a primary polling this per-session
+  // would be one HTTP round-trip per session on every list refresh; this is
+  // the endpoint that makes a single-request-per-host list refresh possible
+  // (see the design plan's "batched per-host live status"). idleThresholdMs
+  // comes from the primary's own Settings -> Notifications & status (an
+  // agent has no Settings to read it from itself). An id this process has
+  // never tracked (never spawned/attached here, or spawned by a since-
+  // restarted process) maps to null — same "no live signal yet" semantics
+  // as routes/sessions.ts's withLiveStatus falls back to for app.pty.get
+  // returning undefined.
+  app.post<{ Body: LiveStatusBody }>(
+    "/internal/sessions/live",
+    { ...INTERNAL_RATE_LIMIT, schema: liveStatusSchema },
+    async (request) => {
+      const { ids, idleThresholdMs } = request.body;
+      // Object.create(null): `ids` are fully caller-controlled and become
+      // object keys below — a plain `{}` is reachable via a key like
+      // "__proto__" (CodeQL: remote property injection). A null-prototype
+      // object serializes identically through JSON.stringify but has no
+      // __proto__ setter to hijack.
+      const result: Record<string, SessionInfo | null> = Object.create(null);
+      for (const id of ids) {
+        result[id] = app.pty.get(id)?.toInfo(idleThresholdMs) ?? null;
+      }
+      return result;
+    },
+  );
+
+  // Bulk systemd-scope liveness for the reconciler (a follow-up PR) — same
+  // batching motivation as /internal/sessions/live above, but backed by
+  // app.pty.isMasterAlive's `systemctl --user is-active` rather than
+  // in-memory state, so it's correct even for a session this process has
+  // never tracked (e.g. right after this agent itself restarted).
+  app.post<{ Body: LivenessBody }>(
+    "/internal/sessions/liveness",
+    { ...INTERNAL_RATE_LIMIT, schema: livenessSchema },
+    async (request) => {
+      const { ids } = request.body;
+      const entries = await Promise.all(
+        ids.map(async (id) => [id, await app.pty.isMasterAlive(id)] as const),
+      );
+      // Same null-prototype treatment as /internal/sessions/live above:
+      // Object.fromEntries builds a plain `{}` internally, equally
+      // reachable via a caller-controlled "__proto__" key.
+      const result: Record<string, boolean> = Object.create(null);
+      for (const [id, alive] of entries) result[id] = alive;
+      return result;
+    },
+  );
+
+  // Mirrors DELETE /api/sessions/:id's app.pty.terminate call — fully ends
+  // the attach-client, the dtach master, and the program itself. The
+  // primary is the one that marks the DB row "killed"; this only ever does
+  // the host-side half.
+  app.post<{ Params: { id: string } }>(
+    "/internal/sessions/:id/terminate",
+    { ...INTERNAL_RATE_LIMIT, schema: terminateSchema },
+    async (request, reply) => {
+      await app.pty.terminate(request.params.id);
+      reply.code(204);
+    },
+  );
+
+  // The DB-less counterpart to /ws/terminal (terminal.ts): the primary
+  // resolves `cwd`/`command` from its own DB (a session's row, falling back
+  // to its project's), then passes them straight through as query params —
+  // this agent has nowhere else to get them from. Everything past that is
+  // identical: attachSocketToSession's getOrCreate is the same idempotent
+  // spawn-or-reattach /ws/terminal itself relies on for the post-restart
+  // reattach case, so this endpoint needs no separate "attach only, don't
+  // spawn" variant.
+  app.get(
+    "/internal/ws/attach",
+    {
+      websocket: true,
+      config: INTERNAL_RATE_LIMIT.config,
+      preValidation: async (request, reply) => {
+        const query = request.query as Record<string, string | undefined>;
+        if (!query.id || !query.cwd || !query.command) {
+          return reply.badRequest("id, cwd, and command query params are required");
+        }
+        // Same shape as SESSION_ID_SCHEMA above — this route takes id as a
+        // query param, not a JSON body, so it can't use the ajv schema
+        // directly, but the id flows into the exact same scopeUnitName(id)
+        // sink (pty-manager.ts) either way.
+        if (!SESSION_ID_PATTERN.test(query.id)) {
+          return reply.badRequest("id must match ^[A-Za-z0-9_-]+$");
+        }
+      },
+    },
+    (socket, req) => {
+      const query = req.query as Record<string, string | undefined>;
+      const cols = Number(query.cols) || 80;
+      const rows = Number(query.rows) || 24;
+
+      attachSocketToSession(app, socket, {
+        id: query.id as string,
+        cwd: expandHome(query.cwd as string),
+        command: query.command as string,
+        cols,
+        rows,
+      });
+    },
+  );
+}

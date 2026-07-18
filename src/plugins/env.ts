@@ -74,20 +74,28 @@ const schema = {
     },
     // Multi-host support (issue #26) — "primary" (default, preserves today's
     // single-process behavior) owns the DB and serves the frontend, and will
-    // proxy host-scoped work to remote "agent" processes over an internal API
-    // (landing in a later PR). "agent" is meant to be DB-less: it runs
-    // PtyManager locally (unchanged) and exposes only a token-gated internal
-    // API — this PR wires the role flag and the fail-closed boot check in
-    // src/app.ts; the internal routes themselves aren't built yet.
+    // proxy host-scoped work to remote "agent" processes over the internal
+    // API in src/routes/internal.ts (the primary side that actually calls
+    // it lands in a later PR). "agent" is DB-less: it runs PtyManager
+    // locally (unchanged) and exposes only that token-gated internal API —
+    // see src/app.ts's fail-closed boot check.
     TESSERA_ROLE: {
       type: "string",
       default: "primary",
       enum: ["primary", "agent"],
     },
-    // Shared secret a future "agent" role's internal API will require on
-    // every request (see src/app.ts's fail-closed boot check: role "agent"
-    // with an empty token refuses to start). Unused when role is "primary" —
-    // per-remote-host tokens will live in the `hosts` table instead.
+    // Shared secret an "agent" role's internal API (src/routes/internal.ts)
+    // requires on every request, including the /internal/ws/attach upgrade —
+    // see src/app.ts's fail-closed boot check: role "agent" with an empty
+    // token refuses to start. Unused when role is "primary" — per-remote-
+    // host tokens will live in the `hosts` table instead.
+    //
+    // Treat this as a full host-compromise credential, not a lightweight
+    // API key: /internal/ws/attach runs `${SHELL} -lc "<command>"` for any
+    // request bearing a valid token, so a leaked token is arbitrary command
+    // execution on the agent host. Generate it with real entropy (e.g.
+    // `openssl rand -hex 32`), scope it per agent, and rotate it the same
+    // way you would an SSH key with shell access to that box.
     TESSERA_AGENT_TOKEN: {
       type: "string",
       default: "",
