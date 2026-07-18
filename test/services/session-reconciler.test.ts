@@ -261,5 +261,59 @@ describe("reconcileExitedSessions", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await app.close();
     });
+
+    it("logs a HostRequestError distinctly from unreachable, without exiting the session (Hermes review, PR #34)", async () => {
+      const app = await buildApp();
+      vi.spyOn(app.pty, "isMasterAlive").mockResolvedValue(true);
+
+      // A reachable agent whose bulk liveness endpoint has a persistent
+      // bug (always 400s) is a fundamentally different situation from a
+      // network blip — it'll recur every cycle rather than resolve on its
+      // own — so the warn log should say so distinctly.
+      const server = http.createServer((req, res) => {
+        res.writeHead(400, { "content-type": "text/plain" });
+        res.end("bad request");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("expected a bound port");
+
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: {
+          name: "buggy-liveness",
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          token: "t",
+        },
+      });
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "p", cwd: "/x", hostId: host.json().id },
+      });
+      const { sessions } = await import("../../src/db/schema.js");
+      const [row] = app.db
+        .insert(sessions)
+        .values({ projectId: project.json().id, command: "bash" })
+        .returning()
+        .all();
+
+      const warnSpy = vi.spyOn(app.log, "warn");
+      await reconcileExitedSessions(app);
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("rejected the liveness request"),
+      );
+
+      const res = await app.inject({ method: "GET", url: "/api/sessions" });
+      const rows = res.json() as Array<{ id: number; status: string }>;
+      expect(rows.find((s) => s.id === row.id)?.status).toBe("active");
+
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await app.close();
+    });
   });
 });

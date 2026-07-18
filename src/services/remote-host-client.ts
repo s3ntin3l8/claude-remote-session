@@ -51,7 +51,10 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // host its own HTTP round trip.
 const LIVE_STATUS_CACHE_TTL_MS = 1_500;
 
-export interface SpawnSessionOptions {
+// spawn() and openAttach() both target the same session — same id/cwd/
+// command/size — just over HTTP vs. WS; kept as one shared shape rather
+// than two field-for-field-identical interfaces.
+export interface SessionTarget {
   id: string;
   cwd: string;
   command: string;
@@ -59,13 +62,8 @@ export interface SpawnSessionOptions {
   rows: number;
 }
 
-export interface OpenAttachOptions {
-  id: string;
-  cwd: string;
-  command: string;
-  cols: number;
-  rows: number;
-}
+export type SpawnSessionOptions = SessionTarget;
+export type OpenAttachOptions = SessionTarget;
 
 export class RemoteHostClient {
   private readonly baseUrl: string;
@@ -97,6 +95,14 @@ export class RemoteHostClient {
         ...init,
         headers: { ...init?.headers, Authorization: `Bearer ${this.token}` },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        // hosts.ts's SSRF guard only validates the *configured* baseUrl —
+        // fetch following a redirect by default would still send the
+        // bearer token to wherever a 3xx response points, bypassing that
+        // guard entirely (e.g. an agent, or a MITM between primary and
+        // agent, redirecting to a cloud IMDS endpoint). "manual" surfaces
+        // the 3xx as a non-ok response (handled as HostUnreachableError
+        // below) instead of ever issuing the follow-up request.
+        redirect: "manual",
       });
     } catch (err) {
       throw new HostUnreachableError(this.hostId, err);
@@ -212,6 +218,11 @@ export class RemoteHostClient {
     try {
       const res = await fetch(`${this.baseUrl}/health`, {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        // Same redirect-bypass reasoning as request() above — no bearer
+        // token to leak here, but a followed redirect would still report
+        // "online" based on an unvalidated target's response instead of
+        // the configured baseUrl's own.
+        redirect: "manual",
       });
       return res.ok;
     } catch {

@@ -43,6 +43,22 @@ describe("RemoteHostClient", () => {
     );
   });
 
+  it("never follows redirects, closing the SSRF bypass a 3xx response would otherwise open (Hermes review, PR #34)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, []));
+    await client().discover();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ redirect: "manual" }),
+    );
+
+    fetchMock.mockClear();
+    await client().ping();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ redirect: "manual" }),
+    );
+  });
+
   it("throws HostUnreachableError on a network failure", async () => {
     fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
     await expect(client().discover()).rejects.toThrow(HostUnreachableError);

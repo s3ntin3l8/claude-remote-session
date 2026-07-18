@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { projects, sessions } from "../db/schema.js";
 import { LOCAL_HOST_ID } from "./host-registry.js";
 import { resolveBackend } from "./session-backend.js";
+import { HostRequestError } from "./remote-host-client.js";
 
 /**
  * Detects sessions whose program exited on its own — user typed `exit`, a
@@ -50,7 +51,24 @@ export async function reconcileExitedSessions(app: FastifyInstance): Promise<voi
       try {
         aliveById = await backend.isMasterAlive(rows.map((r) => String(r.session.id)));
       } catch (err) {
-        app.log.warn({ hostId, err }, "session reconcile: host unreachable, skipping its sessions");
+        // Still skip either way (no per-session data survives a thrown
+        // bulk call, from either error) — but a HostRequestError means the
+        // host IS reachable and just rejected the request (a real,
+        // persistent agent-side bug, not a transient blip), so unlike
+        // HostUnreachableError it will keep recurring every cycle without
+        // ever resolving on its own. Logged distinctly so that's visible
+        // to an operator rather than reading identically to "network blip."
+        if (err instanceof HostRequestError) {
+          app.log.warn(
+            { hostId, err },
+            "session reconcile: host rejected the liveness request (reachable but erroring), skipping its sessions",
+          );
+        } else {
+          app.log.warn(
+            { hostId, err },
+            "session reconcile: host unreachable, skipping its sessions",
+          );
+        }
         return;
       }
 
