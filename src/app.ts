@@ -7,6 +7,7 @@ import { dbPlugin } from "./plugins/db.js";
 import { ptyPlugin } from "./plugins/pty.js";
 import { websocketPlugin } from "./plugins/websocket.js";
 import { staticPlugin } from "./plugins/static.js";
+import { previewProxyPlugin } from "./plugins/preview-proxy.js";
 import { rootRoute } from "./routes/root.js";
 import { healthRoute } from "./routes/health.js";
 import { usersRoute } from "./routes/users.js";
@@ -74,6 +75,14 @@ export async function buildApp() {
   await app.register(ptyPlugin);
   await app.register(websocketPlugin);
   await app.register(staticPlugin);
+  // Registered as its own plugin (not a route module) alongside
+  // staticPlugin above — both serve raw content rather than a JSON API,
+  // and both are host/config-gated no-ops until their prerequisite exists
+  // (a built frontend dir; a configured PREVIEW_BASE_HOST). Route
+  // *registration* order doesn't affect precedence against static's own
+  // wildcard route below — find-my-way's host constraint does that — but
+  // this keeps the two visually grouped.
+  await app.register(previewProxyPlugin);
 
   await app.register(rootRoute);
   await app.register(healthRoute);

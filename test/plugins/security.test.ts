@@ -5,6 +5,7 @@ describe("security plugin", () => {
   afterEach(() => {
     delete process.env.RATE_LIMIT_MAX;
     delete process.env.CORS_ORIGIN;
+    delete process.env.PREVIEW_BASE_HOST;
   });
 
   it("sets security headers from helmet", async () => {
@@ -12,6 +13,24 @@ describe("security plugin", () => {
     const res = await app.inject({ method: "GET", url: "/health" });
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
     expect(res.headers["x-frame-options"]).toBeDefined();
+    await app.close();
+  });
+
+  it("has no explicit frame-src by default (falls back to default-src 'self')", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/health" });
+    expect(res.headers["content-security-policy"]).not.toMatch(/frame-src/);
+    await app.close();
+  });
+
+  it("allows framing the preview subdomain once PREVIEW_BASE_HOST is set (issue #28)", async () => {
+    process.env.PREVIEW_BASE_HOST = "preview.example.com";
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    expect(csp).toMatch(/frame-src [^;]*'self'/);
+    expect(csp).toContain("http://*.preview.example.com");
+    expect(csp).toContain("https://*.preview.example.com");
     await app.close();
   });
 
