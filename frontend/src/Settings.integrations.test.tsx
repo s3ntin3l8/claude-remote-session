@@ -60,6 +60,15 @@ describe("Settings -> Integrations", () => {
         integration = { ...DISCONNECTED };
         return Promise.resolve(new Response(null, { status: 204 }));
       }
+      if (url === "/api/integrations/github/device/start" && method === "POST") {
+        return Promise.resolve(
+          jsonResponse(200, {
+            status: "pending",
+            userCode: "ABCD-1234",
+            verificationUri: "https://github.com/login/device",
+          }),
+        );
+      }
 
       unexpectedCalls.push(`${method} ${url}`);
       return Promise.reject(new Error(`unhandled fetch in test: ${method} ${url}`));
@@ -122,5 +131,29 @@ describe("Settings -> Integrations", () => {
       "/api/integrations/github",
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+
+  it("hides the device-flow button when deviceFlowAvailable is false", async () => {
+    render(<Settings onClose={vi.fn()} initialSection="integrations" />);
+    await screen.findByText("Not connected");
+    expect(screen.queryByText("Connect with GitHub")).not.toBeInTheDocument();
+  });
+
+  it("opens the device-flow modal when deviceFlowAvailable is true", async () => {
+    integration = { ...DISCONNECTED, deviceFlowAvailable: true };
+    const user = userEvent.setup();
+    const { unmount } = render(<Settings onClose={vi.fn()} initialSection="integrations" />);
+
+    await user.click(await screen.findByText("Connect with GitHub"));
+    expect(await screen.findByText("ABCD-1234")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/integrations/github/device/start",
+      expect.objectContaining({ method: "POST" }),
+    );
+    // Unmount before the modal's own 2s poll interval fires — this
+    // describe's fake backend doesn't stub /device/status, and a stray
+    // poll after this test ends would otherwise hit `unexpectedCalls` on
+    // whichever later test's afterEach happens to run next.
+    unmount();
   });
 });

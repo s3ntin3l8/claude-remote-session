@@ -2158,6 +2158,19 @@ body {
 .create-modal-submit:hover {
   filter: brightness(1.08);
 }
+/* GitHub device-flow code (GitHubDeviceFlowModal.tsx, issue #27 phase 4) —
+   the user_code GitHub asks for at the verification_uri. */
+.device-flow-code {
+  font-family: "Geist Mono", monospace;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: center;
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+  color: var(--fg);
+}
 .settings-modal-close:hover {
   color: var(--fg);
 }

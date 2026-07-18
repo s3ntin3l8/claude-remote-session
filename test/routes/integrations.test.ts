@@ -5,6 +5,7 @@ import fs from "node:fs";
 import { buildApp } from "../../src/app.js";
 import { closeDb } from "../../src/db/client.js";
 import { disconnect } from "../../src/services/github-integration.js";
+import { resetDeviceFlowForTests } from "../../src/services/github-device-flow.js";
 
 function jsonResponse(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -36,6 +37,7 @@ describe("integrations route (issue #27)", () => {
 
   afterEach(async () => {
     vi.unstubAllGlobals();
+    resetDeviceFlowForTests();
     // Singleton row shared across this file's tests (see beforeAll) — reset
     // it so an earlier test's connected state never leaks into the next.
     const app = await buildApp();
@@ -107,5 +109,70 @@ describe("integrations route (issue #27)", () => {
     const get = await app.inject({ method: "GET", url: "/api/integrations/github" });
     expect(get.json()).toEqual(expect.objectContaining({ connected: false }));
     await app.close();
+  });
+
+  describe("device flow (phase 4)", () => {
+    const DEVICE_CODE_RESPONSE = {
+      device_code: "device-code-abc",
+      user_code: "ABCD-1234",
+      verification_uri: "https://github.com/login/device",
+      expires_in: 900,
+      interval: 5,
+    };
+
+    beforeAll(() => {
+      process.env.GITHUB_OAUTH_CLIENT_ID = "Iv1.test-client-id";
+    });
+
+    afterAll(() => {
+      delete process.env.GITHUB_OAUTH_CLIENT_ID;
+    });
+
+    it("GET status 404s with no attempt in progress", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/integrations/github/device/status",
+      });
+      expect(res.statusCode).toBe(404);
+      await app.close();
+    });
+
+    it("POST start returns pending + user_code, and GET status reflects it", async () => {
+      fetchMock.mockResolvedValue(jsonResponse(200, DEVICE_CODE_RESPONSE));
+      const app = await buildApp();
+
+      const start = await app.inject({
+        method: "POST",
+        url: "/api/integrations/github/device/start",
+      });
+      expect(start.statusCode).toBe(200);
+      expect(start.json()).toEqual({
+        status: "pending",
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+      });
+      expect(start.body).not.toMatch(/device-code-abc/);
+
+      const status = await app.inject({
+        method: "GET",
+        url: "/api/integrations/github/device/status",
+      });
+      expect(status.statusCode).toBe(200);
+      expect(status.json().userCode).toBe("ABCD-1234");
+      await app.close();
+    });
+
+    it("POST start 400s when device flow isn't configured", async () => {
+      delete process.env.GITHUB_OAUTH_CLIENT_ID;
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/integrations/github/device/start",
+      });
+      expect(res.statusCode).toBe(400);
+      process.env.GITHUB_OAUTH_CLIENT_ID = "Iv1.test-client-id";
+      await app.close();
+    });
   });
 });
