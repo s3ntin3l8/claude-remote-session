@@ -48,12 +48,29 @@ interface CacheEntry {
 
 // Keyed by "owner/repo" — module-level, shared across every project that
 // happens to point at the same repo (e.g. two projects checked out from the
-// same remote). Deliberately unbounded: the number of distinct repos a
-// single install's projects point at is small compared to, say, a
-// per-session cache, and this process's whole lifetime is the same order of
-// magnitude other in-memory caches in this codebase already assume
-// (RemoteHostClient's liveStatusCache).
+// same remote). Capped rather than truly unbounded (Hermes review, PR #39):
+// a normal install's distinct-repo count is small, but nothing stops an
+// unbounded number of distinct project cwds from being registered, so this
+// still needs a ceiling on process memory. `Map` preserves insertion order,
+// so evicting `cache.keys().next().value` evicts the oldest entry — a
+// cheap approximate-LRU good enough for a 60s-TTL status cache, not a
+// correctness-sensitive one.
+export const MAX_CACHE_ENTRIES = 200;
 const cache = new Map<string, CacheEntry>();
+
+function cacheSet(key: string, entry: CacheEntry): void {
+  if (!cache.has(key) && cache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) cache.delete(oldestKey);
+  }
+  cache.set(key, entry);
+}
+
+/** Test-only introspection — mirrors clearAgentsCacheForTests's pattern
+ * (agent-detect.ts) for a module-level cache. */
+export function getCacheSizeForTests(): number {
+  return cache.size;
+}
 
 interface GitHubIssueApiItem {
   number: number;
@@ -141,6 +158,6 @@ export async function getRepoStatus(
     pulls,
     issues,
   };
-  cache.set(key, { ts: Date.now(), etag: res.headers.get("etag"), data });
+  cacheSet(key, { ts: Date.now(), etag: res.headers.get("etag"), data });
   return data;
 }

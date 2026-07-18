@@ -15,13 +15,29 @@ export interface GitHubRepoRef {
   repo: string;
 }
 
+// GitHub's own naming rules — an owner is alphanumeric/hyphen (never a
+// leading/trailing/double hyphen in practice, not worth encoding exactly);
+// a repo adds dot/underscore. Capturing exactly this charset (rather than
+// `[^/]+`) both rejects a malformed/non-GitHub value up front and gives the
+// values a validated shape before they flow into github.ts's API URL and
+// this repo's own htmlUrl construction — CodeQL flagged the untightened
+// version as file-derived data reaching an outbound request; a strict
+// allowlist capture is the standard fix (Hermes review, PR #39).
+const GH_OWNER = "[A-Za-z0-9-]+";
+// Lazy (`+?`), not greedy — a literal ".git" suffix is itself a valid
+// sequence of repo-name characters, so a greedy `+` would swallow it
+// whole and leave nothing for the `(?:\.git)?` group below to strip.
+const GH_REPO = "[A-Za-z0-9._-]+?";
+
 // SSH form: git@github.com:owner/repo(.git). HTTPS form: (optionally
 // user@-prefixed, e.g. a PAT-in-URL remote) https://github.com/owner/repo(.git)(/).
 // Neither matches a GitHub Enterprise host, GitLab, Bitbucket, etc. — those
 // fall through to null, same as a missing remote (the widget just doesn't
 // render; see routes/projects.ts's GET .../github).
-const SSH_REMOTE = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?\/?$/;
-const HTTPS_REMOTE = /^https?:\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/;
+const SSH_REMOTE = new RegExp(`^git@github\\.com:(${GH_OWNER})/(${GH_REPO})(?:\\.git)?/?$`);
+const HTTPS_REMOTE = new RegExp(
+  `^https?://(?:[^@/]+@)?github\\.com/(${GH_OWNER})/(${GH_REPO})(?:\\.git)?/?$`,
+);
 
 function parseRemoteUrl(url: string): GitHubRepoRef | null {
   const ssh = url.match(SSH_REMOTE);
@@ -39,6 +55,19 @@ function parseRemoteUrl(url: string): GitHubRepoRef | null {
  * "no GitHub repo here" as a missing one.
  */
 export function parseGitRemote(cwd: string): GitHubRepoRef | null {
+  // `cwd` here is always meant to be an already-resolved absolute directory
+  // (a project's own `cwd` column, or an agent-side value already passed
+  // through resolveWithinRoots — see routes/projects.ts and
+  // routes/internal.ts). Reject a relative one outright rather than
+  // resolving it against this process's own cwd (whose value at call time
+  // isn't something a caller should be able to lean on) — the meaningful
+  // half of this guard. The `path.normalize` + `".."`-segment check is
+  // effectively a no-op for an already-absolute path specifically (Node
+  // collapses `..` during normalize before this ever runs), but is kept as
+  // the standard, CodeQL-recognized js/path-injection sanitizer shape.
+  if (!path.isAbsolute(cwd) || path.normalize(cwd).split(path.sep).includes("..")) {
+    return null;
+  }
   const configPath = path.join(cwd, ".git", "config");
   if (!existsSync(configPath)) return null;
 

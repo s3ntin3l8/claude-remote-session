@@ -69,4 +69,17 @@ describe("parseGitRemote", () => {
   it("returns null when cwd isn't a git repo at all", () => {
     expect(parseGitRemote(tmpDir)).toBeNull();
   });
+
+  it("returns null for a relative cwd, even one that would otherwise resolve correctly", () => {
+    writeGitConfig(tmpDir, '[remote "origin"]\n\turl = git@github.com:owner/repo.git\n');
+    expect(parseGitRemote(path.relative(process.cwd(), tmpDir))).toBeNull();
+  });
+
+  it("rejects an owner/repo containing characters outside GitHub's naming charset", () => {
+    writeGitConfig(
+      tmpDir,
+      '[remote "origin"]\n\turl = git@github.com:owner_with_underscore/repo.git\n',
+    );
+    expect(parseGitRemote(tmpDir)).toBeNull();
+  });
 });

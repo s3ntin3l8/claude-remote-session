@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { GitHubApiError, getRepoStatus } from "../../src/services/github.js";
+import {
+  GitHubApiError,
+  getRepoStatus,
+  getCacheSizeForTests,
+  MAX_CACHE_ENTRIES,
+} from "../../src/services/github.js";
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
@@ -89,5 +94,22 @@ describe("getRepoStatus", () => {
     await expect(getRepoStatus("tok", "unreachable-owner", "unreachable-repo")).rejects.toThrow(
       GitHubApiError,
     );
+  });
+
+  it("caps the module-level cache at MAX_CACHE_ENTRIES, evicting the oldest entry (Hermes review, PR #39)", async () => {
+    // A fresh Response per call — a Response body can only be read once,
+    // and mockResolvedValue would hand back the exact same instance for
+    // every one of these MAX_CACHE_ENTRIES+ calls.
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, [])));
+    for (let i = 0; i < MAX_CACHE_ENTRIES + 5; i++) {
+      await getRepoStatus("tok", `cap-owner-${i}`, "repo");
+    }
+    expect(getCacheSizeForTests()).toBe(MAX_CACHE_ENTRIES);
+
+    // The oldest entries (0-4) were evicted to make room — re-fetching one
+    // of them costs a real fetch again, not a cache hit.
+    const callsBefore = fetchMock.mock.calls.length;
+    await getRepoStatus("tok", "cap-owner-0", "repo");
+    expect(fetchMock.mock.calls.length).toBe(callsBefore + 1);
   });
 });
