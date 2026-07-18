@@ -44,11 +44,14 @@ export const projects = sqliteTable("projects", {
     .references(() => hosts.id),
   // Where this project's dev server listens — issue #28. A bare port
   // ("5173") or a full "scheme://host:port" URL; the preview proxy
-  // (src/plugins/preview-proxy.ts) parses this to find the upstream. For a
-  // remote-hosted project only the port (+ path) is meaningful — the host is
-  // always forced to that agent's own loopback, never caller-supplied (see
-  // the plan's loopback-only two-hop boundary). Nullable: most projects have
-  // no dev server, or haven't configured one yet.
+  // (src/plugins/preview-proxy.ts) parses this to find the upstream.
+  // IMPORTANT: for a remote-hosted project (hostId !== "local"), any host in
+  // this value is never trusted or connected to — the proxy always forces
+  // the destination to that agent's own loopback, forwarding only the
+  // port (+ path) from here. Don't read a host out of this column and treat
+  // it as reachable; it isn't part of the trust boundary (see the plan's
+  // loopback-only two-hop design). Nullable: most projects have no dev
+  // server, or haven't configured one yet.
   devServerUrl: text("dev_server_url"),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()

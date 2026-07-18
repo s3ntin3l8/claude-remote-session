@@ -66,7 +66,12 @@ const updateProjectSchema = {
 // fallback the preview proxy resolves against (auto-discovery, a later
 // phase, only ever pre-fills this; it never overrides it). Accepts either a
 // bare port, since "the project's dev server" is usually all a user actually
-// knows, or a full URL for the uncommon case (non-default host/path).
+// knows, or a full URL for the uncommon case (non-default host/path). This
+// only checks shape (a well-formed port/URL) — it deliberately does not
+// reject a host component like "http://localhost:5173" for a remote-hosted
+// project, because that host is never actually used for one: the preview
+// proxy forces the connection to the owning agent's own loopback and only
+// forwards the port/path from here (see schema.ts's devServerUrl comment).
 const DEV_SERVER_PORT_ONLY = /^\d{1,5}$/;
 
 function isValidDevServerUrl(value: string): boolean {

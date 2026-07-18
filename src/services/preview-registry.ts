@@ -50,19 +50,25 @@ export function getOrCreateProjectPreview(app: FastifyInstance, projectId: numbe
   const [project] = app.db.select().from(projects).where(eq(projects.id, projectId)).all();
   if (!project) throw new UnknownProjectError(projectId);
 
-  const [existing] = app.db
+  // An upsert, not select-then-insert: two concurrent opens of the same
+  // brand-new project's browser pane must not race the
+  // previews_project_id_unique index — select-then-insert lets both sides
+  // miss the not-yet-existing row and then have the loser's insert throw
+  // (PR #43 review). onConflictDoNothing makes the losing insert a no-op
+  // instead, so the select below always finds a row afterward regardless of
+  // which side actually created it.
+  app.db
+    .insert(previews)
+    .values({ slug: newSlug(), kind: "project", projectId })
+    .onConflictDoNothing({ target: previews.projectId })
+    .run();
+
+  const [row] = app.db
     .select()
     .from(previews)
     .where(and(eq(previews.kind, "project"), eq(previews.projectId, projectId)))
     .all();
-  if (existing) return toSummary(existing);
-
-  const [created] = app.db
-    .insert(previews)
-    .values({ slug: newSlug(), kind: "project", projectId })
-    .returning()
-    .all();
-  return toSummary(created);
+  return toSummary(row);
 }
 
 // One row per registered URL (see schema.ts) — unlike the project case above,
