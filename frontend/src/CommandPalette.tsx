@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api.js";
 import type { Launcher, Session } from "./api.js";
 import { useDashboardStore } from "./store.js";
-import { ChevronDownIcon, FolderIcon, GitHubIcon, SearchIcon } from "./icons.js";
+import { ChevronDownIcon, FolderIcon, GitHubIcon, GlobeIcon, SearchIcon } from "./icons.js";
 import { resolveLauncherLogo } from "./cliLogos.js";
 
 // The unified launcher menu — one component backs the toolbar's "New
@@ -53,6 +53,9 @@ interface CommandPaletteProps {
   // which this component has direct access to).
   onOpenGitHub: (projectId: number) => void;
   onOpenIntegrationsSettings: () => void;
+  // Issue #28: same section, opening a browser preview pane for this
+  // project's dev server.
+  onOpenBrowser: (projectId: number) => void;
 }
 
 // The parent (App.tsx) only mounts this component while the palette is
@@ -65,6 +68,7 @@ export function CommandPalette({
   onClose,
   onLaunched,
   onOpenGitHub,
+  onOpenBrowser,
   onOpenIntegrationsSettings,
 }: CommandPaletteProps) {
   const { projects, sessions, createSession, theme, settings } = useDashboardStore();
@@ -261,6 +265,28 @@ export function CommandPalette({
                       <span className="cmd-row-subtitle">
                         Open issues, pull requests, and status
                       </span>
+                    </span>
+                  </button>
+                )}
+                {effectiveProjectId !== null && (
+                  <button
+                    className="cmd-row"
+                    onClick={() => {
+                      onOpenBrowser(effectiveProjectId);
+                      onClose();
+                    }}
+                  >
+                    <span
+                      className="cmd-row-icon"
+                      style={{ background: "color-mix(in srgb, var(--fg) 8%, transparent)" }}
+                    >
+                      <GlobeIcon size={13} style={{ color: "var(--muted)" }} />
+                    </span>
+                    <span className="cmd-row-body">
+                      <span className="cmd-row-title">
+                        Preview: {target?.name ?? "this project"}
+                      </span>
+                      <span className="cmd-row-subtitle">Open this project's dev server</span>
                     </span>
                   </button>
                 )}

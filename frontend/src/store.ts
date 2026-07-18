@@ -183,7 +183,10 @@ interface DashboardState {
   refreshGroups: () => Promise<void>;
   refreshHosts: () => Promise<void>;
   createProject: (name: string, cwd: string, hostId?: string) => Promise<Project>;
-  updateProject: (id: number, patch: Partial<Pick<Project, "name" | "cwd">>) => Promise<void>;
+  updateProject: (
+    id: number,
+    patch: Partial<Pick<Project, "name" | "cwd" | "devServerUrl">>,
+  ) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
   createHost: (name: string, baseUrl: string, token: string) => Promise<Host>;
   updateHost: (

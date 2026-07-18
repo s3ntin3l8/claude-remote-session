@@ -61,7 +61,7 @@ describe("Dock GitHub widget", () => {
 
   it("renders nothing when the endpoint 204s (no remote/no token configured)", async () => {
     githubResponse = () => new Response(null, { status: 204 });
-    render(<Dock projectId={1} onOpenGitHub={vi.fn()} />);
+    render(<Dock projectId={1} onOpenGitHub={vi.fn()} onOpenBrowser={vi.fn()} />);
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith("/api/projects/1/github", expect.anything()),
@@ -71,7 +71,7 @@ describe("Dock GitHub widget", () => {
 
   it("shows the repo, issue count, and PR count once the status loads", async () => {
     githubResponse = () => jsonResponse(200, STATUS);
-    render(<Dock projectId={1} onOpenGitHub={vi.fn()} />);
+    render(<Dock projectId={1} onOpenGitHub={vi.fn()} onOpenBrowser={vi.fn()} />);
 
     expect(await screen.findByText("acme/widgets")).toBeInTheDocument();
     expect(screen.getByText("3 issues")).toBeInTheDocument();
@@ -82,7 +82,7 @@ describe("Dock GitHub widget", () => {
     githubResponse = () => jsonResponse(200, STATUS);
     const onOpenGitHub = vi.fn();
     const user = userEvent.setup();
-    render(<Dock projectId={1} onOpenGitHub={onOpenGitHub} />);
+    render(<Dock projectId={1} onOpenGitHub={onOpenGitHub} onOpenBrowser={vi.fn()} />);
 
     const row = await screen.findByText("acme/widgets");
     await user.click(row);
@@ -90,9 +90,32 @@ describe("Dock GitHub widget", () => {
     expect(onOpenGitHub).toHaveBeenCalledWith(1);
   });
 
+  it("shows a browser-preview row when the project has a devServerUrl, and opens it on click", async () => {
+    githubResponse = () => new Response(null, { status: 204 });
+    useDashboardStore.setState({ projects: [{ ...PROJECT, devServerUrl: "5173" }], sessions: [] });
+    const onOpenBrowser = vi.fn();
+    const user = userEvent.setup();
+    render(<Dock projectId={1} onOpenGitHub={vi.fn()} onOpenBrowser={onOpenBrowser} />);
+
+    const row = await screen.findByText("5173");
+    await user.click(row);
+
+    expect(onOpenBrowser).toHaveBeenCalledWith(1);
+  });
+
+  it("hides the browser-preview row when the project has no devServerUrl", async () => {
+    githubResponse = () => new Response(null, { status: 204 });
+    render(<Dock projectId={1} onOpenGitHub={vi.fn()} onOpenBrowser={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/projects/1/github", expect.anything()),
+    );
+    expect(screen.queryByTitle(/Open browser preview/)).not.toBeInTheDocument();
+  });
+
   it("shows no CI dot when ciStatus is null (Actions disabled/no runs)", async () => {
     githubResponse = () => jsonResponse(200, STATUS);
-    render(<Dock projectId={1} onOpenGitHub={vi.fn()} />);
+    render(<Dock projectId={1} onOpenGitHub={vi.fn()} onOpenBrowser={vi.fn()} />);
 
     await screen.findByText("acme/widgets");
     expect(document.querySelector(".github-panel-ci-dot")).not.toBeInTheDocument();
@@ -100,7 +123,7 @@ describe("Dock GitHub widget", () => {
 
   it("shows a CI dot reflecting ciStatus once Actions data is present", async () => {
     githubResponse = () => jsonResponse(200, { ...STATUS, ciStatus: "failure" });
-    render(<Dock projectId={1} onOpenGitHub={vi.fn()} />);
+    render(<Dock projectId={1} onOpenGitHub={vi.fn()} onOpenBrowser={vi.fn()} />);
 
     await screen.findByText("acme/widgets");
     const dot = document.querySelector(".github-panel-ci-dot");

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { FolderIcon, CloseIcon, HostsIcon } from "./icons.js";
+import { FolderIcon, CloseIcon, GlobeIcon, HostsIcon } from "./icons.js";
 import { LOCAL_HOST_ID } from "./api.js";
 import type { Host } from "./api.js";
 import { Dropdown } from "./settings/primitives.js";
@@ -9,7 +9,15 @@ interface CreateProjectModalProps {
   // `hostId` is only ever passed to `onCreate` in "create" mode (see the
   // host selector below) — a project's host can't change after creation
   // (issue #26: cwd is host-specific), so "edit" callers ignore it.
-  onCreate: (name: string, cwd: string, hostId?: string) => Promise<unknown>;
+  // `devServerUrl` is the reverse: only ever meaningful in "edit" mode (see
+  // the field below) — `null` clears a previously-set value, `undefined`
+  // (create mode) means "not applicable, ignore this argument".
+  onCreate: (
+    name: string,
+    cwd: string,
+    hostId?: string,
+    devServerUrl?: string | null,
+  ) => Promise<unknown>;
   // Phase 4d: this same modal doubles as "Edit project" (kebab menu on a
   // project row), pre-filled with the project's current name/cwd — a
   // project has no edit surface otherwise. `onCreate` still fires with
@@ -17,6 +25,9 @@ interface CreateProjectModalProps {
   mode?: "create" | "edit";
   initialName?: string;
   initialPath?: string;
+  // Issue #28 — pre-fills the dev-server field, edit mode only (a brand-new
+  // project has nothing running yet to point this at).
+  initialDevServerUrl?: string | null;
   // Registered hosts (issue #26) — the selector only renders in "create"
   // mode, and only once a remote host actually exists, so a single-host
   // deployment sees no extra UI at all.
@@ -39,12 +50,14 @@ export function CreateProjectModal({
   mode = "create",
   initialName = "",
   initialPath = "",
+  initialDevServerUrl = null,
   hosts = [],
 }: CreateProjectModalProps) {
   const [path, setPath] = useState(initialPath);
   const [name, setName] = useState(initialName);
   const [namePlaceholder, setNamePlaceholder] = useState("my-project");
   const [hostId, setHostId] = useState(LOCAL_HOST_ID);
+  const [devServerUrl, setDevServerUrl] = useState(initialDevServerUrl ?? "");
   const isEdit = mode === "edit";
   const pathInputRef = useRef<HTMLInputElement>(null);
   const remoteHosts = hosts.filter((h) => h.id !== LOCAL_HOST_ID);
@@ -70,7 +83,13 @@ export function CreateProjectModal({
       return;
     }
     const finalName = name.trim() || trailingSegment(trimmedPath);
-    void onCreate(finalName, trimmedPath, isEdit ? undefined : hostId).then(onClose);
+    const trimmedDevServerUrl = devServerUrl.trim();
+    void onCreate(
+      finalName,
+      trimmedPath,
+      isEdit ? undefined : hostId,
+      isEdit ? (trimmedDevServerUrl === "" ? null : trimmedDevServerUrl) : undefined,
+    ).then(onClose);
   };
 
   return (
@@ -150,6 +169,27 @@ export function CreateProjectModal({
               Defaults to the folder name if left blank.
             </span>
           </label>
+
+          {isEdit && (
+            <label className="create-modal-field">
+              <span className="create-modal-field-label">Dev server</span>
+              <span className="create-modal-input-row">
+                <GlobeIcon size={15} style={{ color: "var(--muted)", flexShrink: 0 }} />
+                <input
+                  className="mono"
+                  value={devServerUrl}
+                  onChange={(e) => setDevServerUrl(e.target.value)}
+                  placeholder="5173"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") confirm();
+                  }}
+                />
+              </span>
+              <span className="create-modal-field-hint">
+                Port or full URL — powers the browser preview pane. Leave blank to clear.
+              </span>
+            </label>
+          )}
         </div>
 
         <div className="create-modal-footer">
