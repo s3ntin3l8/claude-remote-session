@@ -325,4 +325,99 @@ describe("projects route", () => {
       await app.close();
     });
   });
+
+  describe("multi-host (issue #26)", () => {
+    it("rejects creating a project with an unknown hostId", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "orphan", cwd: "/x", hostId: "does-not-exist" },
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it("stores a remote project's cwd raw, without local ~-expansion", async () => {
+      const app = await buildApp();
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "box", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote", cwd: "~/on-the-agent", hostId: host.json().id },
+      });
+      expect(created.statusCode).toBe(201);
+      // Expanding against *this* process's home dir would be wrong — issue
+      // #26's landmine #3: a remote cwd must resolve on the agent's own
+      // filesystem, so the primary stores/forwards it untouched.
+      expect(created.json().cwd).toBe("~/on-the-agent");
+      await app.close();
+    });
+
+    it("keys discovery's isRegistered match by (hostId, cwd), not cwd alone", async () => {
+      const app = await buildApp();
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "box-2", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const hostId = host.json().id as string;
+      // A *local* project at the same cwd a remote discover candidate would
+      // report must not make that remote candidate look already-registered.
+      await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "same-path-local", cwd: "/shared/path" },
+      });
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/projects/discover?hostId=${hostId}`,
+      });
+      // The unreachable remote host makes discovery itself fail — 503,
+      // never a false "isRegistered" derived from the local project above.
+      expect(res.statusCode).toBe(503);
+      await app.close();
+    });
+
+    it("404s discovery for an unknown hostId", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/projects/discover?hostId=does-not-exist",
+      });
+      expect(res.statusCode).toBe(404);
+      await app.close();
+    });
+
+    it("503s actions/dock for a project on an unreachable remote host", async () => {
+      const app = await buildApp();
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "box-3", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-actions", cwd: "/x", hostId: host.json().id },
+      });
+      const projectId = project.json().id;
+
+      const actions = await app.inject({
+        method: "GET",
+        url: `/api/projects/${projectId}/actions`,
+      });
+      expect(actions.statusCode).toBe(503);
+
+      const dock = await app.inject({ method: "GET", url: `/api/projects/${projectId}/dock` });
+      expect(dock.statusCode).toBe(503);
+
+      await app.close();
+    });
+  });
 });

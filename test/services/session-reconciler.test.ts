@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import http from "node:http";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
 
@@ -132,5 +133,187 @@ describe("reconcileExitedSessions", () => {
     expect(row?.status).toBe("killed");
 
     await app.close();
+  });
+
+  describe("multi-host (issue #26)", () => {
+    it("skips an unreachable remote host's sessions entirely, never flipping them to exited", async () => {
+      const app = await buildApp();
+      // A local session, alive, alongside a remote one on an unreachable
+      // host — the whole point of this test is that the *local* group must
+      // still reconcile normally even while the remote group's host is
+      // down (grouped-by-host, one failure doesn't abort the other group).
+      const localSessionId = await createSession(app);
+      vi.spyOn(app.pty, "isMasterAlive").mockResolvedValue(true);
+
+      const badHost = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "goes-down", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const remoteProject = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-p", cwd: "/x", hostId: badHost.json().id },
+      });
+      const { sessions } = await import("../../src/db/schema.js");
+      const [remoteRow] = app.db
+        .insert(sessions)
+        .values({ projectId: remoteProject.json().id, command: "bash" })
+        .returning()
+        .all();
+
+      await reconcileExitedSessions(app);
+
+      const res = await app.inject({ method: "GET", url: "/api/sessions" });
+      const rows = res.json() as Array<{ id: number; status: string }>;
+      // Local session still reconciles (still active — its scope reports
+      // alive above), and the remote one is left untouched at "active"
+      // rather than being wrongly flipped to "exited" for a host that's
+      // merely unreachable right now.
+      expect(rows.find((s) => s.id === localSessionId)?.status).toBe("active");
+      expect(rows.find((s) => s.id === remoteRow.id)?.status).toBe("active");
+
+      await app.close();
+    });
+
+    it("does not exit a session a reachable host's liveness response omits (Hermes review, PR #34)", async () => {
+      const app = await buildApp();
+      // Earlier tests in this describe block leave "active" LOCAL sessions
+      // behind in this file's shared on-disk DB (no per-test cleanup) —
+      // reconcileExitedSessions groups those into a "local" host group too,
+      // and this file's child_process mock only ever emits "exit" (never
+      // "close"), which real isMasterAlive() waits on — so any test that
+      // doesn't stub it hangs forever on that leftover group. Every other
+      // test here either stubs this or never leaves an active local
+      // session; this one only cares about the remote group below.
+      vi.spyOn(app.pty, "isMasterAlive").mockResolvedValue(true);
+      let omittedId: string | null = null;
+
+      const server = http.createServer((req, res) => {
+        if (req.url !== "/internal/sessions/liveness") {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
+        let body = "";
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          const { ids } = JSON.parse(body) as { ids: string[] };
+          // Simulate agent version skew / a partial response: every
+          // requested id gets an answer EXCEPT `omittedId`. Built via
+          // Map/fromEntries rather than a keyed assignment onto a plain
+          // object (CodeQL: remote property injection on a request-derived
+          // key — this is a test-only fake server with no real attack
+          // surface, but the safer shape is just as easy to write).
+          const entries = ids.filter((id) => id !== omittedId).map((id) => [id, true] as const);
+          const payload = JSON.stringify(Object.fromEntries(entries));
+          res.writeHead(200, {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          });
+          res.end(payload);
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("expected a bound port");
+
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: {
+          name: "partial-liveness",
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          token: "t",
+        },
+      });
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "p", cwd: "/x", hostId: host.json().id },
+      });
+      const { sessions } = await import("../../src/db/schema.js");
+      const [omitted] = app.db
+        .insert(sessions)
+        .values({ projectId: project.json().id, command: "bash" })
+        .returning()
+        .all();
+      const [included] = app.db
+        .insert(sessions)
+        .values({ projectId: project.json().id, command: "bash" })
+        .returning()
+        .all();
+      omittedId = String(omitted.id);
+
+      await reconcileExitedSessions(app);
+
+      const res = await app.inject({ method: "GET", url: "/api/sessions" });
+      const rows = res.json() as Array<{ id: number; status: string }>;
+      // Omitted key -> "unknown," must be skipped, never treated as "not
+      // alive" -> exited (the exact landmine this fix closes).
+      expect(rows.find((s) => s.id === omitted.id)?.status).toBe("active");
+      expect(rows.find((s) => s.id === included.id)?.status).toBe("active");
+
+      // server.close()'s callback otherwise hangs until every keep-alive
+      // connection closes on its own — fetch()'s undici client holds one
+      // open well past this test's assertions.
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await app.close();
+    });
+
+    it("logs a HostRequestError distinctly from unreachable, without exiting the session (Hermes review, PR #34)", async () => {
+      const app = await buildApp();
+      vi.spyOn(app.pty, "isMasterAlive").mockResolvedValue(true);
+
+      // A reachable agent whose bulk liveness endpoint has a persistent
+      // bug (always 400s) is a fundamentally different situation from a
+      // network blip — it'll recur every cycle rather than resolve on its
+      // own — so the warn log should say so distinctly.
+      const server = http.createServer((req, res) => {
+        res.writeHead(400, { "content-type": "text/plain" });
+        res.end("bad request");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("expected a bound port");
+
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: {
+          name: "buggy-liveness",
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          token: "t",
+        },
+      });
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "p", cwd: "/x", hostId: host.json().id },
+      });
+      const { sessions } = await import("../../src/db/schema.js");
+      const [row] = app.db
+        .insert(sessions)
+        .values({ projectId: project.json().id, command: "bash" })
+        .returning()
+        .all();
+
+      const warnSpy = vi.spyOn(app.log, "warn");
+      await reconcileExitedSessions(app);
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("rejected the liveness request"),
+      );
+
+      const res = await app.inject({ method: "GET", url: "/api/sessions" });
+      const rows = res.json() as Array<{ id: number; status: string }>;
+      expect(rows.find((s) => s.id === row.id)?.status).toBe("active");
+
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await app.close();
+    });
   });
 });

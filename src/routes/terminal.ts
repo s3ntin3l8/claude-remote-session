@@ -2,6 +2,8 @@ import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import { eq } from "drizzle-orm";
 import { projects, sessions } from "../db/schema.js";
+import { LOCAL_HOST_ID } from "../services/host-registry.js";
+import { getRemoteHostClient } from "../services/remote-host-client.js";
 
 interface ResizeMessage {
   type: "resize";
@@ -115,6 +117,91 @@ export function attachSocketToSession(
   });
 }
 
+/**
+ * The remote counterpart to attachSocketToSession above: opens an upstream
+ * WS to the owning agent's `/internal/ws/attach` and pipes bytes both ways
+ * — not a free pass-through (issue #26's design plan §6):
+ *   - browser→agent: forward every frame raw (binary input, JSON resize).
+ *   - agent→browser: forward raw but replicate attachSocketToSession's own
+ *     `bufferedAmount` backpressure drop, and keep reading the upstream
+ *     socket regardless so a slow browser tab never stalls the agent.
+ *   - close/error: agent side closing closes the browser (the frontend's
+ *     own reconnect/backoff then takes over); browser closing closes the
+ *     agent side; a failed upstream open closes the browser with a logged
+ *     reason rather than hanging the upgrade.
+ * The primary (not the agent, which has no DB) owns `lastAttachedAt` —
+ * already written by the caller before this is invoked.
+ */
+export function proxyToRemoteAttach(
+  app: FastifyInstance,
+  browserSocket: WebSocket,
+  hostId: string,
+  opts: AttachSessionParams,
+): void {
+  const closeBrowser = () => {
+    if (browserSocket.readyState === browserSocket.OPEN) browserSocket.close();
+  };
+
+  let upstream: ReturnType<ReturnType<typeof getRemoteHostClient>["openAttach"]>;
+  try {
+    upstream = getRemoteHostClient(app, hostId).openAttach(opts);
+  } catch (err) {
+    app.log.error({ err, hostId, sessionId: opts.id }, "failed to open remote terminal attach");
+    closeBrowser();
+    return;
+  }
+
+  const closeUpstream = () => {
+    if (upstream.readyState === upstream.OPEN || upstream.readyState === upstream.CONNECTING) {
+      upstream.close();
+    }
+  };
+
+  // Registered unconditionally, not inside upstream's "open" handler: the
+  // upstream connect can take up to REQUEST_TIMEOUT_MS, and gating these on
+  // "open" meant keystrokes typed during that window were silently dropped
+  // (the forwarding check below already no-ops until upstream is OPEN), and
+  // a browser tab closed before the upstream even opened never registered
+  // closeUpstream at all — leaking that connection. Same backpressure drop
+  // as the agent->browser direction below, applied to this direction too —
+  // a slow/misbehaving agent must not let this browser->agent buffer grow
+  // unbounded.
+  browserSocket.on("message", (data, isBinary) => {
+    if (upstream.readyState !== upstream.OPEN) return;
+    if (upstream.bufferedAmount > BACKPRESSURE_MAX_BUFFERED_BYTES) return;
+    upstream.send(data, { binary: isBinary });
+  });
+  browserSocket.on("close", closeUpstream);
+
+  // Also unconditional (not nested in "open"): if the upstream socket
+  // itself closes/errors before ever opening — a connection reset, the
+  // agent dropping mid-handshake — closeBrowser must still run. Only the
+  // "message" handler stays inside "open", since messages can't arrive
+  // before that anyway.
+  upstream.on("close", closeBrowser);
+  upstream.on("error", (err) => {
+    app.log.error({ err, hostId, sessionId: opts.id }, "remote terminal ws upstream error");
+    closeBrowser();
+  });
+
+  upstream.once("open", () => {
+    app.log.info({ hostId, sessionId: opts.id }, "remote terminal ws attached");
+
+    upstream.on("message", (data, isBinary) => {
+      if (browserSocket.readyState !== browserSocket.OPEN) return;
+      if (browserSocket.bufferedAmount > BACKPRESSURE_MAX_BUFFERED_BYTES) return;
+      browserSocket.send(data, { binary: isBinary });
+    });
+  });
+  upstream.once("unexpected-response", (_req, res) => {
+    app.log.error(
+      { hostId, sessionId: opts.id, statusCode: res.statusCode },
+      "agent rejected remote terminal attach",
+    );
+    closeBrowser();
+  });
+}
+
 export async function terminalRoute(app: FastifyInstance) {
   app.get(
     "/ws/terminal",
@@ -162,13 +249,19 @@ export async function terminalRoute(app: FastifyInstance) {
         .where(eq(sessions.id, sessionId))
         .run();
 
-      attachSocketToSession(app, socket, {
+      const attachOpts = {
         id: String(sessionId),
         cwd: row.cwd ?? project.cwd,
         command: row.command,
         cols,
         rows,
-      });
+      };
+
+      if (project.hostId === LOCAL_HOST_ID) {
+        attachSocketToSession(app, socket, attachOpts);
+      } else {
+        proxyToRemoteAttach(app, socket, project.hostId, attachOpts);
+      }
     },
   );
 }

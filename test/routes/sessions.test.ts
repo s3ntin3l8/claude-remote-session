@@ -249,4 +249,122 @@ describe("sessions route", () => {
 
     await app.close();
   });
+
+  describe("multi-host (issue #26)", () => {
+    async function createRemoteProject(app: Awaited<ReturnType<typeof buildApp>>) {
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        // Deliberately unreachable (port 1 refuses immediately) rather than
+        // mocked — exercises the real HostUnreachableError path.
+        payload: { name: "unreachable", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const hostId = host.json().id as string;
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-p", cwd: "/remote/path", hostId },
+      });
+      return project.json().id as number;
+    }
+
+    it("rolls back the session row when spawning on an unreachable remote host fails", async () => {
+      const app = await buildApp();
+      const projectId = await createRemoteProject(app);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      expect(res.statusCode).toBe(502);
+
+      const list = await app.inject({ method: "GET", url: `/api/sessions?projectId=${projectId}` });
+      expect(list.json()).toEqual([]);
+
+      await app.close();
+    });
+
+    it("reports default live status for a session whose host is unreachable, without 500ing", async () => {
+      const app = await buildApp();
+      const { sessions } = await import("../../src/db/schema.js");
+      const projectId = await createProject(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const badHost = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "goes-down", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const remoteProject = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-list", cwd: "/x", hostId: badHost.json().id },
+      });
+      // Insert a session row directly (bypassing POST /api/sessions' spawn
+      // step, which would fail/rollback for this unreachable host — see
+      // the rollback test above) to exercise "list a session whose host is
+      // currently unreachable" in isolation.
+      const [orphan] = app.db
+        .insert(sessions)
+        .values({ projectId: remoteProject.json().id, command: "bash" })
+        .returning()
+        .all();
+
+      const listRes = await app.inject({
+        method: "GET",
+        url: `/api/sessions?projectId=${remoteProject.json().id}`,
+      });
+      expect(listRes.statusCode).toBe(200);
+      expect(listRes.json()).toEqual([
+        expect.objectContaining({ id: orphan.id, alive: false, activity: "idle" }),
+      ]);
+
+      // The original local session is unaffected by the other host's
+      // unreachability.
+      const localList = await app.inject({
+        method: "GET",
+        url: `/api/sessions?projectId=${projectId}`,
+      });
+      expect(localList.json()).toEqual([expect.objectContaining({ id: sessionId })]);
+
+      await app.close();
+    });
+
+    it("marks a session killed instead of 500ing when its host's terminate call fails (Hermes review, PR #34)", async () => {
+      const app = await buildApp();
+      const { sessions } = await import("../../src/db/schema.js");
+      const badHost = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "goes-down-2", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const remoteProject = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-delete", cwd: "/x", hostId: badHost.json().id },
+      });
+      const [orphan] = app.db
+        .insert(sessions)
+        .values({ projectId: remoteProject.json().id, command: "bash" })
+        .returning()
+        .all();
+
+      const deleted = await app.inject({ method: "DELETE", url: `/api/sessions/${orphan.id}` });
+      expect(deleted.statusCode).toBe(204);
+
+      const list = await app.inject({
+        method: "GET",
+        url: `/api/sessions?projectId=${remoteProject.json().id}`,
+      });
+      expect(list.json()).toEqual([expect.objectContaining({ id: orphan.id, status: "killed" })]);
+
+      await app.close();
+    });
+  });
 });

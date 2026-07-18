@@ -11,10 +11,14 @@ import {
 } from "../services/project-config.js";
 import { getStoredSettings } from "../services/settings.js";
 import { resolveGlobalPresets } from "./actions.js";
+import { LOCAL_HOST_ID, getHostRow } from "../services/host-registry.js";
+import { getRemoteHostClient } from "../services/remote-host-client.js";
+import { resolveBackend } from "../services/session-backend.js";
 
 interface CreateProjectBody {
   name: string;
   cwd: string;
+  hostId?: string;
 }
 
 interface UpdateProjectBody {
@@ -34,6 +38,7 @@ const createProjectSchema = {
     properties: {
       name: { type: "string", minLength: 1 },
       cwd: { type: "string", minLength: 1 },
+      hostId: { type: "string", minLength: 1 },
     },
   },
 };
@@ -83,15 +88,33 @@ export async function projectsRoute(app: FastifyInstance) {
   // plugin file back to this handler, but an explicit route-level limit
   // both satisfies that check directly and is independently reasonable
   // given the cost of this specific handler.
-  app.get(
+  app.get<{ Querystring: { hostId?: string } }>(
     "/api/projects/discover",
     { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
-    async () => {
-      const candidates = discoverCandidates(resolveProjectRoots(app));
+    async (request, reply) => {
+      const hostId = request.query.hostId ?? LOCAL_HOST_ID;
+
+      let candidates: DiscoveredCandidate[];
+      if (hostId === LOCAL_HOST_ID) {
+        candidates = discoverCandidates(resolveProjectRoots(app));
+      } else {
+        if (!getHostRow(app, hostId)) return reply.notFound(`Unknown host ${hostId}`);
+        try {
+          candidates = await getRemoteHostClient(app, hostId).discover();
+        } catch (err) {
+          app.log.warn({ hostId, err }, "host unreachable, discovery unavailable");
+          return reply.serviceUnavailable(`Host ${hostId} is unreachable`);
+        }
+      }
+
+      // Discovery is per-host (issue #26): a cwd on one host registering
+      // as "already added" must never match a same-path project on a
+      // different host, so the match key is (hostId, cwd), not cwd alone.
       const registeredCwds = new Set(
         app.db
           .select({ cwd: projects.cwd })
           .from(projects)
+          .where(eq(projects.hostId, hostId))
           .all()
           .map((p) => p.cwd),
       );
@@ -116,8 +139,20 @@ export async function projectsRoute(app: FastifyInstance) {
     const [project] = app.db.select().from(projects).where(eq(projects.id, projectId)).all();
     if (!project) return reply.notFound();
 
-    const globalPresets = await resolveGlobalPresets(app);
-    return resolveProjectActions(project.cwd, globalPresets);
+    if (project.hostId === LOCAL_HOST_ID) {
+      const globalPresets = await resolveGlobalPresets(app);
+      return resolveProjectActions(project.cwd, globalPresets);
+    }
+    // Global presets (installed CLIs, global .crs/actions.json) come from
+    // the remote agent's own host, not this process — see
+    // remote-host-client.ts's resolveActions and routes/internal.ts's
+    // /internal/actions, which resolves both halves host-side already.
+    try {
+      return await getRemoteHostClient(app, project.hostId).resolveActions(project.cwd);
+    } catch (err) {
+      app.log.warn({ hostId: project.hostId, err }, "host unreachable, actions unavailable");
+      return reply.serviceUnavailable(`Host ${project.hostId} is unreachable`);
+    }
   });
 
   // Dock controls for this project — persistent monitors (dev server, git
@@ -131,7 +166,15 @@ export async function projectsRoute(app: FastifyInstance) {
     const [project] = app.db.select().from(projects).where(eq(projects.id, projectId)).all();
     if (!project) return reply.notFound();
 
-    return resolveProjectDock(project.cwd, app.config.CRS_CONFIG_DIR);
+    if (project.hostId === LOCAL_HOST_ID) {
+      return resolveProjectDock(project.cwd, app.config.CRS_CONFIG_DIR);
+    }
+    try {
+      return await getRemoteHostClient(app, project.hostId).resolveDock(project.cwd);
+    } catch (err) {
+      app.log.warn({ hostId: project.hostId, err }, "host unreachable, dock unavailable");
+      return reply.serviceUnavailable(`Host ${project.hostId} is unreachable`);
+    }
   });
 
   app.post<{ Body: CreateProjectBody }>(
@@ -139,13 +182,20 @@ export async function projectsRoute(app: FastifyInstance) {
     { schema: createProjectSchema },
     async (request, reply) => {
       const { name, cwd } = request.body;
+      const hostId = request.body.hostId ?? LOCAL_HOST_ID;
+      if (hostId !== LOCAL_HOST_ID && !getHostRow(app, hostId)) {
+        return reply.badRequest(`Unknown hostId ${hostId}`);
+      }
       // The create-project modal's own placeholder is a literal `~/...`
       // path (ported from the design) — expand it the same way
       // PROJECTS_ROOTS/CRS_CONFIG_DIR already are, so a session spawned
-      // against this project's cwd doesn't fail to resolve it.
+      // against this project's cwd doesn't fail to resolve it. Only for
+      // "local": a remote project's cwd expands against the *agent's* own
+      // home dir, not this process's — see host-registry.ts/issue #26's
+      // landmine #3 — so it's stored/forwarded raw instead.
       const [created] = app.db
         .insert(projects)
-        .values({ name, cwd: expandHome(cwd) })
+        .values({ name, cwd: hostId === LOCAL_HOST_ID ? expandHome(cwd) : cwd, hostId })
         .returning()
         .all();
       reply.code(201);
@@ -165,12 +215,17 @@ export async function projectsRoute(app: FastifyInstance) {
       const projectId = Number(request.params.id);
       if (!Number.isInteger(projectId)) return reply.badRequest("Invalid project id");
 
+      const [existing] = app.db.select().from(projects).where(eq(projects.id, projectId)).all();
+      if (!existing) return reply.notFound();
+
       const { name, cwd } = request.body;
       const updated = app.db
         .update(projects)
         .set({
           ...(name !== undefined ? { name } : {}),
-          ...(cwd !== undefined ? { cwd: expandHome(cwd) } : {}),
+          ...(cwd !== undefined
+            ? { cwd: existing.hostId === LOCAL_HOST_ID ? expandHome(cwd) : cwd }
+            : {}),
         })
         .where(eq(projects.id, projectId))
         .returning()
@@ -187,12 +242,28 @@ export async function projectsRoute(app: FastifyInstance) {
     const projectId = Number(request.params.id);
     if (!Number.isInteger(projectId)) return reply.badRequest("Invalid project id");
 
+    const [project] = app.db.select().from(projects).where(eq(projects.id, projectId)).all();
+    if (!project) return reply.notFound();
+
     const projectSessions = app.db
       .select()
       .from(sessions)
       .where(eq(sessions.projectId, projectId))
       .all();
-    await Promise.all(projectSessions.map((session) => app.pty.terminate(String(session.id))));
+    const backend = resolveBackend(app, project.hostId);
+    await Promise.all(
+      projectSessions.map((session) =>
+        backend.terminate(String(session.id)).catch((err) => {
+          // Best-effort, same as hosts.ts's cascade delete: an unreachable
+          // host can't be told to terminate anything, and that must not
+          // block deleting the (now orphaned-on-that-host) project row.
+          app.log.warn(
+            { hostId: project.hostId, sessionId: session.id, err },
+            "project delete: best-effort session terminate failed",
+          );
+        }),
+      ),
+    );
 
     const deleted = app.db.delete(projects).where(eq(projects.id, projectId)).returning().all();
     if (deleted.length === 0) return reply.notFound();
