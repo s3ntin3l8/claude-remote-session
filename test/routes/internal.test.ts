@@ -235,6 +235,49 @@ describe("internal routes (agent role, issue #26)", () => {
     await app.close();
   });
 
+  it("rejects a cwd outside this agent's own PROJECTS_ROOTS (CodeQL: uncontrolled data in path expression)", async () => {
+    const app = await buildApp();
+    const outsideRoots = fs.mkdtempSync(path.join(os.tmpdir(), "internal-outside-roots-"));
+
+    const actions = await app.inject({
+      method: "GET",
+      url: `/internal/actions?cwd=${encodeURIComponent(outsideRoots)}`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(actions.statusCode).toBe(400);
+
+    const dock = await app.inject({
+      method: "GET",
+      url: `/internal/dock?cwd=${encodeURIComponent(outsideRoots)}`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(dock.statusCode).toBe(400);
+
+    fs.rmSync(outsideRoots, { recursive: true, force: true });
+    await app.close();
+  });
+
+  it("rejects a session id that isn't a plain alphanumeric token", async () => {
+    const app = await buildApp();
+
+    const terminateRes = await app.inject({
+      method: "POST",
+      url: `/internal/sessions/${encodeURIComponent("weird;id")}/terminate`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(terminateRes.statusCode).toBe(400);
+
+    const spawnRes = await app.inject({
+      method: "POST",
+      url: "/internal/sessions",
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { id: "weird id", cwd: "/tmp", command: "bash", cols: 80, rows: 24 },
+    });
+    expect(spawnRes.statusCode).toBe(400);
+
+    await app.close();
+  });
+
   it("returns this host's detected agents", async () => {
     const app = await buildApp();
     const res = await app.inject({
@@ -332,6 +375,19 @@ describe("internal routes (agent role, issue #26)", () => {
     const ws = new NodeWebSocket(`ws://127.0.0.1:${port}/internal/ws/attach?id=x`, {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
+    const outcome = await waitForNodeWsOutcome(ws);
+    expect(outcome).toBe("close");
+
+    await app.close();
+  });
+
+  it("rejects a WS attach whose id isn't a plain alphanumeric token", async () => {
+    const { app, port } = await buildAndListen();
+
+    const ws = new NodeWebSocket(
+      `ws://127.0.0.1:${port}/internal/ws/attach?id=${encodeURIComponent("weird;id")}&cwd=%2Ftmp&command=bash&cols=80&rows=24`,
+      { headers: { authorization: `Bearer ${TOKEN}` } },
+    );
     const outcome = await waitForNodeWsOutcome(ws);
     expect(outcome).toBe("close");
 

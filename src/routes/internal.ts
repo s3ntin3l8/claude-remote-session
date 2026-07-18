@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import crypto from "node:crypto";
+import path from "node:path";
 import {
   discoverCandidates,
   expandHome,
@@ -29,13 +30,28 @@ interface LivenessBody {
   ids: string[];
 }
 
+// A session id is always the primary's stringified integer row id
+// (String(sessionId) — see terminal.ts/sessions.ts) by construction, but
+// this schema is the agent's only defense against a malformed one: it flows
+// straight into pty-manager.ts's scopeUnitName(id) -> `crs-session-<id>`,
+// naming a real systemd --user scope and dtach socket file. An id with
+// systemd- or filesystem-illegal characters (e.g. "/") wouldn't be an
+// injection (spawn/stop always use an argv array, never a shell string),
+// but would make bootstrap/terminate silently target the wrong unit/file.
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const SESSION_ID_SCHEMA = {
+  type: "string",
+  minLength: 1,
+  pattern: SESSION_ID_PATTERN.source,
+} as const;
+
 const spawnSessionSchema = {
   body: {
     type: "object",
     required: ["id", "cwd", "command", "cols", "rows"],
     additionalProperties: false,
     properties: {
-      id: { type: "string", minLength: 1 },
+      id: SESSION_ID_SCHEMA,
       cwd: { type: "string", minLength: 1 },
       command: { type: "string", minLength: 1 },
       cols: { type: "integer", minimum: 1 },
@@ -50,7 +66,7 @@ const liveStatusSchema = {
     required: ["ids", "idleThresholdMs"],
     additionalProperties: false,
     properties: {
-      ids: { type: "array", items: { type: "string", minLength: 1 } },
+      ids: { type: "array", items: SESSION_ID_SCHEMA },
       idleThresholdMs: { type: "integer", minimum: 0 },
     },
   },
@@ -62,7 +78,17 @@ const livenessSchema = {
     required: ["ids"],
     additionalProperties: false,
     properties: {
-      ids: { type: "array", items: { type: "string", minLength: 1 } },
+      ids: { type: "array", items: SESSION_ID_SCHEMA },
+    },
+  },
+};
+
+const terminateSchema = {
+  params: {
+    type: "object",
+    required: ["id"],
+    properties: {
+      id: SESSION_ID_SCHEMA,
     },
   },
 };
@@ -82,6 +108,36 @@ const INTERNAL_RATE_LIMIT = { config: { rateLimit: { max: 1000, timeWindow: "1 m
 function timingSafeTokenMatch(provided: string, expected: string): boolean {
   if (provided.length !== expected.length) return false;
   return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+}
+
+/**
+ * Constrain a request-supplied cwd to this agent's own PROJECTS_ROOTS before
+ * it reaches a filesystem read — the sole trust anchor a DB-less agent has,
+ * and the same scope /internal/discover already surfaces. Returns the
+ * resolved absolute path when `cwd` is one of (or a descendant of) a
+ * configured root, else null. Without this, /internal/actions and
+ * /internal/dock would read whatever `.crs/actions.json`/`.crs/dock.json`/
+ * `package.json`/`.vscode/tasks.json` happens to exist at ANY path the
+ * caller names — flagged by CodeQL as uncontrolled data in a path
+ * expression (and, downstream, a log-injection sink in project-config.ts's
+ * warn() calls) once these routes started passing a raw request query
+ * param into project-config.ts's file reads.
+ *
+ * Deliberately NOT applied to /internal/sessions or /internal/ws/attach
+ * (session spawn/attach) below: a session's cwd is the whole point of the
+ * feature and, like the primary's own unrestricted POST /api/projects cwd,
+ * isn't scoped to PROJECTS_ROOTS today — spawning a program is already
+ * fully gated by the shared token, the same trust boundary a roots check
+ * here wouldn't add anything to. This is a deliberate, narrower scope than
+ * "every cwd-accepting route," not an oversight.
+ */
+function resolveWithinRoots(app: FastifyInstance, cwd: string): string | null {
+  const resolved = path.resolve(expandHome(cwd));
+  const roots = parseProjectsRootsEnv(app.config.PROJECTS_ROOTS).map((root) => path.resolve(root));
+  const withinRoots = roots.some(
+    (root) => resolved === root || resolved.startsWith(root + path.sep),
+  );
+  return withinRoots ? resolved : null;
 }
 
 /**
@@ -125,8 +181,10 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { cwd } = request.query;
       if (!cwd) return reply.badRequest("cwd query param is required");
+      const resolvedCwd = resolveWithinRoots(app, cwd);
+      if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
       const globalPresets = await resolveGlobalPresets(app);
-      return resolveProjectActions(expandHome(cwd), globalPresets);
+      return resolveProjectActions(resolvedCwd, globalPresets);
     },
   );
 
@@ -136,7 +194,9 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { cwd } = request.query;
       if (!cwd) return reply.badRequest("cwd query param is required");
-      return resolveProjectDock(expandHome(cwd), app.config.CRS_CONFIG_DIR);
+      const resolvedCwd = resolveWithinRoots(app, cwd);
+      if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
+      return resolveProjectDock(resolvedCwd, app.config.CRS_CONFIG_DIR);
     },
   );
 
@@ -175,7 +235,12 @@ export async function internalRoutes(app: FastifyInstance) {
     { ...INTERNAL_RATE_LIMIT, schema: liveStatusSchema },
     async (request) => {
       const { ids, idleThresholdMs } = request.body;
-      const result: Record<string, SessionInfo | null> = {};
+      // Object.create(null): `ids` are fully caller-controlled and become
+      // object keys below — a plain `{}` is reachable via a key like
+      // "__proto__" (CodeQL: remote property injection). A null-prototype
+      // object serializes identically through JSON.stringify but has no
+      // __proto__ setter to hijack.
+      const result: Record<string, SessionInfo | null> = Object.create(null);
       for (const id of ids) {
         result[id] = app.pty.get(id)?.toInfo(idleThresholdMs) ?? null;
       }
@@ -196,7 +261,12 @@ export async function internalRoutes(app: FastifyInstance) {
       const entries = await Promise.all(
         ids.map(async (id) => [id, await app.pty.isMasterAlive(id)] as const),
       );
-      return Object.fromEntries(entries);
+      // Same null-prototype treatment as /internal/sessions/live above:
+      // Object.fromEntries builds a plain `{}` internally, equally
+      // reachable via a caller-controlled "__proto__" key.
+      const result: Record<string, boolean> = Object.create(null);
+      for (const [id, alive] of entries) result[id] = alive;
+      return result;
     },
   );
 
@@ -206,7 +276,7 @@ export async function internalRoutes(app: FastifyInstance) {
   // the host-side half.
   app.post<{ Params: { id: string } }>(
     "/internal/sessions/:id/terminate",
-    INTERNAL_RATE_LIMIT,
+    { ...INTERNAL_RATE_LIMIT, schema: terminateSchema },
     async (request, reply) => {
       await app.pty.terminate(request.params.id);
       reply.code(204);
@@ -230,6 +300,13 @@ export async function internalRoutes(app: FastifyInstance) {
         const query = request.query as Record<string, string | undefined>;
         if (!query.id || !query.cwd || !query.command) {
           return reply.badRequest("id, cwd, and command query params are required");
+        }
+        // Same shape as SESSION_ID_SCHEMA above — this route takes id as a
+        // query param, not a JSON body, so it can't use the ajv schema
+        // directly, but the id flows into the exact same scopeUnitName(id)
+        // sink (pty-manager.ts) either way.
+        if (!SESSION_ID_PATTERN.test(query.id)) {
+          return reply.badRequest("id must match ^[A-Za-z0-9_-]+$");
         }
       },
     },
