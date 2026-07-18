@@ -2,10 +2,12 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
-import { WebSocket as NodeWebSocket } from "ws";
+import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
 
 // The agent's /internal/* API (issue #26) reaches the exact same PtyManager
 // spawn/liveness path as the primary's own routes (sessions.ts, terminal.ts)
@@ -128,6 +130,34 @@ function waitForNodeWsOutcome(ws: NodeWebSocket): Promise<"open" | "close"> {
     ws.once("close", () => resolve("close"));
     ws.once("unexpected-response", () => resolve("close"));
     ws.once("error", () => resolve("close"));
+  });
+}
+
+// The near side (this test's own client) can finish its handshake with the
+// agent before the agent's own upstream connection to the loopback stub
+// has — pipeWsFrames deliberately drops (not queues) a message sent before
+// the upstream is OPEN, same tradeoff as terminal.ts's own
+// proxyToRemoteAttach. Retrying the send until a response arrives, rather
+// than sending once and awaiting a fixed delay, is this repo's existing
+// convention for this exact gap (see preview-ws-proxy.test.ts's own
+// identical helper).
+function sendUntilEcho(ws: NodeWebSocket, message: string, timeoutMs = 4000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const onMessage = (data: Buffer) => {
+      clearInterval(interval);
+      resolve(data.toString());
+    };
+    ws.once("message", onMessage);
+    const interval = setInterval(() => {
+      if (Date.now() > deadline) {
+        clearInterval(interval);
+        ws.off("message", onMessage);
+        reject(new Error("no response received before timeout"));
+        return;
+      }
+      if (ws.readyState === NodeWebSocket.OPEN) ws.send(message);
+    }, 20);
   });
 }
 
@@ -480,5 +510,177 @@ describe("internal routes (agent role, issue #26)", () => {
 
     ws.close();
     await app.close();
+  });
+
+  describe("/internal/preview* (issue #28 phase 6 — the agent's own loopback-only proxy half)", () => {
+    let stubHttpServer: http.Server;
+    let stubWss: WebSocketServer;
+    let stubPort: number;
+
+    beforeAll(async () => {
+      stubHttpServer = http.createServer((req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ host: req.headers.host, path: req.url }));
+      });
+      stubWss = new WebSocketServer({ server: stubHttpServer });
+      stubWss.on("connection", (socket) => {
+        socket.on("message", (data) => socket.send(`echo:${data.toString()}`));
+      });
+      await new Promise<void>((resolve) => stubHttpServer.listen(0, "127.0.0.1", resolve));
+      stubPort = (stubHttpServer.address() as AddressInfo).port;
+    });
+
+    afterAll(async () => {
+      await new Promise<void>((resolve) => stubWss.close(() => resolve()));
+      await new Promise<void>((resolve) => stubHttpServer.close(() => resolve()));
+    });
+
+    it("proxies to this agent's own loopback dev server, stripping its own auth header before forwarding", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "GET",
+        url: `/internal/preview/${stubPort}/some/asset.js?v=1`,
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.path).toBe("/some/asset.js?v=1");
+      // The stub echoes whatever Authorization header it received — none,
+      // proving buildUpstreamRequestHeaders' "authorization" exclusion
+      // actually stripped this agent's own bearer token before the
+      // onward loopback fetch (it would otherwise leak this agent's
+      // shared secret to arbitrary project dev-server code).
+      expect(body.host).toBe(`127.0.0.1:${stubPort}`);
+      await app.close();
+    });
+
+    it("rejects a non-numeric or out-of-range port", async () => {
+      const app = await buildApp();
+      const notNumeric = await app.inject({
+        method: "GET",
+        url: "/internal/preview/not-a-port/x",
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(notNumeric.statusCode).toBe(400);
+
+      const outOfRange = await app.inject({
+        method: "GET",
+        url: "/internal/preview/70000/x",
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(outOfRange.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it("502s when the loopback dev server is unreachable", async () => {
+      const app = await buildApp();
+      // Port 1: a real, always-refused loopback port (same convention used
+      // throughout this repo's other "unreachable" tests).
+      const res = await app.inject({
+        method: "GET",
+        url: "/internal/preview/1/",
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(res.statusCode).toBe(502);
+      await app.close();
+    });
+
+    // The core security claim of this phase: this agent must only ever
+    // dial its own loopback, regardless of what path the primary forwards
+    // — see resolveLoopbackPreviewUrl's own comment for the two concrete
+    // bypasses (network-path reference, HTTP userinfo) a naive
+    // string-concatenation would have been vulnerable to.
+    it("never dials off-loopback, even for a path smuggling a network-path reference or userinfo host", async () => {
+      const app = await buildApp();
+      for (const maliciousRest of [
+        "//evil.example.com/x",
+        "/\\evil.example.com/x",
+        "@evil.example.com/",
+      ]) {
+        const res = await app.inject({
+          method: "GET",
+          url: `/internal/preview/${stubPort}/${maliciousRest}`,
+          headers: { authorization: `Bearer ${TOKEN}` },
+        });
+        // Either rejected outright (400, the expected outcome) or, in the
+        // worst case a future change weakens the parse, proxied — but
+        // NEVER to evil.example.com: assert on the stub's own recorded
+        // host if it somehow got a 200.
+        if (res.statusCode === 200) {
+          expect(res.json().host).toBe(`127.0.0.1:${stubPort}`);
+        } else {
+          expect(res.statusCode).toBe(400);
+        }
+      }
+      await app.close();
+    });
+
+    it("400s (not 500s) a preview path that `new URL()` itself throws on (Hermes review, PR #48)", async () => {
+      // Confirmed via node -e: `new URL("//[::a.b.c.d]/x", base)` throws
+      // TypeError outright rather than just parsing into something
+      // resolveLoopbackPreviewUrl would otherwise reject — a case its own
+      // try/catch exists for.
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "GET",
+        url: `/internal/preview/${stubPort}///[::a.b.c.d]/x`,
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it("rejects a WS preview upgrade with a non-numeric port or missing path", async () => {
+      const { app, port } = await buildAndListen();
+
+      const badPort = new NodeWebSocket(
+        `ws://127.0.0.1:${port}/internal/ws/preview?port=not-a-port&path=%2F`,
+        { headers: { authorization: `Bearer ${TOKEN}` } },
+      );
+      expect(await waitForNodeWsOutcome(badPort)).toBe("close");
+
+      const missingPath = new NodeWebSocket(
+        `ws://127.0.0.1:${port}/internal/ws/preview?port=${stubPort}`,
+        { headers: { authorization: `Bearer ${TOKEN}` } },
+      );
+      expect(await waitForNodeWsOutcome(missingPath)).toBe("close");
+
+      await app.close();
+    });
+
+    // A network-path reference doesn't get *rejected* pre-handshake — it
+    // gets *sanitized* (resolveLoopbackPreviewUrl only ever keeps the
+    // pathname/search, see its own comment) and the upgrade proceeds
+    // against the real loopback dev server, same as the HTTP case above.
+    // The assertion that matters isn't "close" — it's "this never actually
+    // dials evil.example.com", proven here by getting a real echo back
+    // from *our* stub.
+    it("sanitizes (not rejects) a WS preview path smuggling a network-path reference — still only ever dials loopback", async () => {
+      const { app, port } = await buildAndListen();
+
+      const ws = new NodeWebSocket(
+        `ws://127.0.0.1:${port}/internal/ws/preview?port=${stubPort}&path=${encodeURIComponent("//evil.example.com/x")}`,
+        { headers: { authorization: `Bearer ${TOKEN}` } },
+      );
+      expect(await waitForNodeWsOutcome(ws)).toBe("open");
+      expect(await sendUntilEcho(ws, "ping")).toBe("echo:ping");
+
+      ws.close();
+      await app.close();
+    });
+
+    it("proxies a WS preview upgrade to this agent's own loopback dev server", async () => {
+      const { app, port } = await buildAndListen();
+
+      const ws = new NodeWebSocket(
+        `ws://127.0.0.1:${port}/internal/ws/preview?port=${stubPort}&path=%2Fhmr`,
+        { headers: { authorization: `Bearer ${TOKEN}` } },
+      );
+      expect(await waitForNodeWsOutcome(ws)).toBe("open");
+      expect(await sendUntilEcho(ws, "ping")).toBe("echo:ping");
+
+      ws.close();
+      await app.close();
+    });
   });
 });

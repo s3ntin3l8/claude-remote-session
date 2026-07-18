@@ -28,6 +28,45 @@ http:
       tls:
         certResolver: CHANGEME_CERTRESOLVER
 
+    # Only needed if you've set PREVIEW_BASE_HOST (issue #28) — the
+    # in-dashboard browser pane's subdomain reverse proxy. Every preview is
+    # served at "preview-<slug>.CHANGEME_PREVIEW_BASE_HOST", so this router
+    # needs a *wildcard* Host rule and a wildcard TLS cert covering
+    # "*.CHANGEME_PREVIEW_BASE_HOST" — a single-name cert (even one that
+    # already covers CHANGEME_HOSTNAME above) will not match a preview
+    # subdomain. CHANGEME_PREVIEW_BASE_HOST is usually (but doesn't have to
+    # be) the same registrable domain as CHANGEME_HOSTNAME, e.g.
+    # "preview.example.com" alongside "dashboard.example.com" — either way
+    # it must equal the app's own PREVIEW_BASE_HOST env var exactly (see
+    # .env.example), since that's what src/services/preview-host.ts matches
+    # the incoming Host header against.
+    #
+    # CHANGEME_MIDDLEWARE — the SAME forwardAuth middleware as the router
+    # above, not a lighter/absent one: every preview is, from Traefik's
+    # perspective, just another path into this same app, and skipping
+    # forwardAuth here would make every preview an unauthenticated open
+    # proxy on the internet (anyone who guesses or observes a slug gets
+    # your dev server's or external URL's content with zero login). This is
+    # non-negotiable, not a "consider tightening later" item.
+    #
+    # Risk 3 (see the router above) applies doubly here: a preview's own
+    # HMR websocket (phase 3) is a *second*, independent WS upgrade this
+    # same forwardAuth/session-cookie dance has to survive — verify both,
+    # not just /ws/terminal's, once this is installed for real.
+    claude-remote-session-preview:
+      rule: "HostRegexp(`preview-.+\\.CHANGEME_PREVIEW_BASE_HOST`)"
+      entryPoints:
+        - websecure
+      service: claude-remote-session
+      middlewares:
+        - CHANGEME_MIDDLEWARE
+      tls:
+        certResolver: CHANGEME_CERTRESOLVER
+        domains:
+          - main: "CHANGEME_PREVIEW_BASE_HOST"
+            sans:
+              - "*.CHANGEME_PREVIEW_BASE_HOST"
+
   services:
     claude-remote-session:
       loadBalancer:

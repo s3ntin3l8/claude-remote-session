@@ -32,6 +32,66 @@ Three placeholders need real values only you have:
 Also fill in the `CHANGEME` paths in `claude-remote-session.service`
 (repo checkout path, nvm-managed node binary path, `.env` location).
 
+## Optional: in-dashboard previews (issue #28)
+
+`PREVIEW_BASE_HOST` (`.env.example`) turns on the browser pane's preview
+feature: a project's dev server, or an arbitrary external URL, opens
+in-dashboard at `preview-<slug>.<PREVIEW_BASE_HOST>`, one subdomain per
+preview. Leave it empty (the default) to skip all of this — no preview
+routes register, `traefik-dynamic.yml`'s preview router never receives
+traffic, and the rest of this section doesn't apply.
+
+If you do set it, four things need real values/infrastructure, on top of
+the three placeholders above:
+
+1. **Wildcard DNS** — `*.<PREVIEW_BASE_HOST>` needs to resolve to the same
+   place `CHANGEME_HOSTNAME` does (a single A/AAAA/CNAME wildcard record;
+   individual preview slugs are never pre-registered, they're minted at
+   runtime).
+2. **Wildcard TLS** — a single-name cert (even one already covering
+   `CHANGEME_HOSTNAME`) will not match `preview-<slug>.<PREVIEW_BASE_HOST>`.
+   `traefik-dynamic.yml`'s preview router requests
+   `*.CHANGEME_PREVIEW_BASE_HOST` via its `tls.domains` block, which forces
+   a **DNS-01** challenge (HTTP-01 can't prove ownership of a wildcard) —
+   make sure your `certResolver` is actually configured with a DNS provider
+   plugin/credentials, not just the default HTTP-01 resolver most
+   single-host Traefik setups use.
+3. **`PREVIEW_BASE_HOST`** in this app's own `.env`, set to the _exact_
+   same value as `CHANGEME_PREVIEW_BASE_HOST` in `traefik-dynamic.yml` —
+   `src/services/preview-host.ts` matches the incoming `Host` header
+   against this string verbatim (case-insensitively), so any mismatch
+   (trailing dot, different casing normalized differently, a port included
+   in one but not the other) means every preview 404s.
+4. **The same forwardAuth middleware on the preview router as the main
+   one** — already wired into `traefik-dynamic.yml`'s template, called out
+   there as non-negotiable: without it, every preview is an unauthenticated
+   open proxy on the internet.
+
+**Risks worth knowing about, not blockers:**
+
+- **WS-through-forwardAuth (the same Risk 3 M4 already flags below)**
+  applies a second time here: a preview's own HMR websocket
+  (`preview-<slug>.<PREVIEW_BASE_HOST>` upgrading `/hmr`-ish paths) is an
+  independent upgrade from `/ws/terminal`'s, and needs the same
+  session-cookie-survives-forwardAuth check verified live against your
+  stack before you trust it in production.
+- **The primary→agent hop is loopback-only, by construction, not by
+  policy** — for a remote-hosted project's preview (issue #28 phase 6), the
+  owning agent's `/internal/preview/:port/*` and `/internal/ws/preview`
+  routes only ever dial `127.0.0.1:<port>` on themselves; the _host_
+  portion of a project's `devServerUrl` is parsed but discarded for a
+  remote project (see `src/plugins/preview-proxy.ts`'s and
+  `src/routes/internal.ts`'s own comments) — even a fully compromised
+  primary or a leaked `TESSERA_AGENT_TOKEN` can only reach ports on the
+  agent's own loopback through this path, not pivot into the agent's LAN.
+- **External-URL previews (issue #28 phase 5) accept a real, documented
+  SSRF surface** — `src/services/url-guard.ts` blocks IP-literal
+  loopback/private/link-local/cloud-IMDS targets at creation time, but
+  doesn't resolve hostnames, so a DNS-rebinding attacker (a hostname that
+  resolves to a public IP at validation time and a private one at request
+  time) isn't defended against today; the guard's own comments call this
+  out as an accepted, known gap rather than an oversight.
+
 ## Install steps (manual — not automated by this repo)
 
 ```sh

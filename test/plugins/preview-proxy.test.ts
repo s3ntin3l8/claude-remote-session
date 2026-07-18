@@ -276,7 +276,13 @@ describe("preview proxy plugin (issue #28, phase 2)", () => {
     await app.close();
   });
 
-  it("503s a remote-hosted project's preview — not proxied until issue #28 phase 6", async () => {
+  it("502s a remote-hosted project's preview when its owning agent is unreachable (issue #28 phase 6)", async () => {
+    // The real two-hop-through-a-live-agent path is covered end-to-end in
+    // test/integration/multi-host-preview.test.ts (two real buildApp()
+    // instances) — this just proves the primary attempts the two-hop
+    // forward (via RemoteHostClient.openPreviewHttp) rather than the old
+    // phase-5-and-earlier "not supported yet" 503, and fails gracefully
+    // (502, not a 500/hang) when the agent can't actually be reached.
     const app = await buildApp();
     const host = await app.inject({
       method: "POST",
@@ -301,7 +307,7 @@ describe("preview proxy plugin (issue #28, phase 2)", () => {
       url: "/",
       headers: { host: `preview-${slug}.${PREVIEW_BASE_HOST}` },
     });
-    expect(res.statusCode).toBe(503);
+    expect(res.statusCode).toBe(502);
     await app.close();
   });
 

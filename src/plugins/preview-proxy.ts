@@ -1,25 +1,29 @@
 import fp from "fastify-plugin";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { eq } from "drizzle-orm";
-import { Readable } from "node:stream";
 import type { Duplex } from "node:stream";
 import type { IncomingMessage } from "node:http";
 import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
 import { projects } from "../db/schema.js";
 import { getPreviewBySlug } from "../services/preview-registry.js";
 import { LOCAL_HOST_ID } from "../services/host-registry.js";
+import { getRemoteHostClient } from "../services/remote-host-client.js";
 import { buildPreviewHostPattern, extractPreviewSlug } from "../services/preview-host.js";
+import { buildUpstreamRequestHeaders, relayFetchResponse } from "../services/http-proxy.js";
+import { pipeWsFrames, toWsUrl } from "../services/ws-pipe.js";
 
 // The two things a resolved preview can point at (see resolvePreviewTarget
-// below) — either a local project's dev server or an arbitrary external
-// URL (issue #28 phase 5, SSRF-guarded at creation time in
-// src/routes/previews.ts, not re-validated here — see url-guard.ts's own
-// comment on the DNS-rebind gap this doesn't close). Both resolve to a
-// base URL via resolveUpstreamBase and proxy identically from that point
-// on — subdomain-based previews don't rewrite paths, so "a project's dev
-// server" and "an external site" are just two ways to obtain that base.
+// below) — either a project's dev server (local, or remote via its owning
+// agent — issue #28 phase 6) or an arbitrary external URL (issue #28 phase
+// 5, SSRF-guarded at creation time in src/routes/previews.ts, not
+// re-validated here — see url-guard.ts's own comment on the DNS-rebind gap
+// this doesn't close). All resolve to a base URL via resolveUpstreamBase
+// and proxy identically from that point on — subdomain-based previews
+// don't rewrite paths, so "a project's dev server" and "an external site"
+// are just two ways to obtain that base.
 type PreviewTarget =
-  { kind: "project"; devServerUrl: string; projectId: number } | { kind: "external"; url: string };
+  | { kind: "project"; devServerUrl: string; projectId: number; hostId: string }
+  | { kind: "external"; url: string };
 
 function resolveUpstreamBase(target: PreviewTarget): URL {
   if (target.kind === "external") return new URL(target.url);
@@ -27,14 +31,31 @@ function resolveUpstreamBase(target: PreviewTarget): URL {
   // isValidDevServerUrl. A full URL's host (and path — see
   // buildUpstreamUrl below) is honored as-is for a *local* project (this
   // process trusts itself, same admin-trust level as hosts.ts's own
-  // baseUrl); the loopback-only boundary this column's own schema.ts
-  // comment describes only applies once a *remote*-hosted project's
-  // preview is proxied through its owning agent (issue #28 phase 6) —
-  // that branch never reaches this function.
+  // baseUrl). For a *remote*-hosted project (hostId !== LOCAL_HOST_ID),
+  // only this URL's port and path are ever used (see
+  // isRemoteProjectTarget's callers below) — its host, if any, is
+  // discarded, since the owning agent forces the actual connection to its
+  // own loopback (issue #28 phase 6, and projects.ts's own
+  // isValidDevServerUrl comment). This function itself stays host-agnostic
+  // either way — it just parses whatever devServerUrl names.
   if (/^\d{1,5}$/.test(target.devServerUrl)) {
     return new URL(`http://127.0.0.1:${target.devServerUrl}/`);
   }
   return new URL(target.devServerUrl);
+}
+
+function isRemoteProjectTarget(
+  target: PreviewTarget,
+): target is Extract<PreviewTarget, { kind: "project" }> {
+  return target.kind === "project" && target.hostId !== LOCAL_HOST_ID;
+}
+
+// A URL's `.port` is "" when the URL has no explicit port (protocol
+// default) — Number("") is 0, not a usable port, so this can't just be
+// `Number(url.port)`.
+function portFromUrl(url: URL): number {
+  if (url.port !== "") return Number(url.port);
+  return url.protocol === "https:" ? 443 : 80;
 }
 
 // `new URL(requestPath, base)` alone is NOT enough to honor a `devServerUrl`
@@ -52,51 +73,6 @@ function buildUpstreamUrl(base: URL, requestUrl: string): URL {
   const suffix = incoming.pathname.startsWith("/") ? incoming.pathname.slice(1) : incoming.pathname;
   return new URL(prefix + suffix + incoming.search, base.origin);
 }
-
-// Hop-by-hop or request-scoped headers that must never pass through
-// unchanged: "host" specifically has to become the *upstream's* host (see
-// buildUpstreamRequestHeaders) or dev servers with a Host allowlist (e.g.
-// Vite's `server.allowedHosts`) 403 every request, since the browser sent
-// "preview-<slug>.<baseHost>", not what the dev server expects to be
-// reached as.
-const HOP_BY_HOP_REQUEST_HEADERS = new Set(["host", "connection", "content-length"]);
-
-function buildUpstreamRequestHeaders(request: FastifyRequest, upstreamHost: string): Headers {
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(request.headers)) {
-    if (value === undefined || HOP_BY_HOP_REQUEST_HEADERS.has(key.toLowerCase())) continue;
-    if (Array.isArray(value)) {
-      for (const v of value) headers.append(key, v);
-    } else {
-      headers.set(key, value);
-    }
-  }
-  headers.set("host", upstreamHost);
-  return headers;
-}
-
-// Headers that would either defeat this whole feature (the target's own
-// X-Frame-Options/CSP would block the dashboard from framing it — the exact
-// mixed-content/embedding problem this proxy exists to solve) or are simply
-// wrong once re-served through fetch()/Fastify rather than passed through a
-// raw socket: fetch() already transparently decompressed the body, so
-// forwarding the upstream's own content-encoding/content-length would
-// describe bytes we're no longer sending; Fastify recomputes
-// framing/length headers itself once the response is actually sent. Since
-// this handler runs as a global onRequest hook ahead of helmet's own (see
-// the plugin registration below), these reply.header() calls simply
-// overwrite whatever helmet already staged — headers are just mutable
-// state on the reply object until the response is actually flushed, so
-// hook *registration* order relative to helmet doesn't matter here.
-const STRIPPED_RESPONSE_HEADERS = new Set([
-  "x-frame-options",
-  "content-security-policy",
-  "content-security-policy-report-only",
-  "content-encoding",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-]);
 
 // Shared by both the HTTP handler (handlePreviewRequest) and the WS upgrade
 // handler (handlePreviewWsUpgrade) below — slug -> preview -> target
@@ -125,18 +101,14 @@ function resolvePreviewTarget(app: FastifyInstance, slug: string): PreviewResolu
       message: `project ${project.id} has no devServerUrl configured`,
     };
   }
-  if (project.hostId !== LOCAL_HOST_ID) {
-    // Remote-hosted project previews are the two-hop proxy in issue #28
-    // phase 6 — not reachable from the primary directly.
-    return {
-      ok: false,
-      status: 503,
-      message: "preview proxying for a remote-hosted project isn't supported yet",
-    };
-  }
   return {
     ok: true,
-    target: { kind: "project", devServerUrl: project.devServerUrl, projectId: project.id },
+    target: {
+      kind: "project",
+      devServerUrl: project.devServerUrl,
+      projectId: project.id,
+      hostId: project.hostId,
+    },
   };
 }
 
@@ -160,11 +132,37 @@ async function handlePreviewRequest(
     return reply.serviceUnavailable(`preview ${slug} has an invalid target URL`);
   }
 
+  const target = resolution.target;
+
+  // For a remote-hosted project, only the port and path/query resolved
+  // above are ever used — the owning agent forces the actual connection to
+  // its own loopback (see resolveUpstreamBase's comment and internal.ts's
+  // loopback assertion), so the Host header sent onward must reflect that
+  // loopback address too, not whatever host a full-URL devServerUrl named,
+  // and the fetch itself goes through the agent's own /internal/preview*
+  // API rather than directly.
+  if (isRemoteProjectTarget(target)) {
+    const headers = buildUpstreamRequestHeaders(request, `127.0.0.1:${portFromUrl(upstreamUrl)}`);
+    let upstreamResponse: Response;
+    try {
+      upstreamResponse = await getRemoteHostClient(app, target.hostId).openPreviewHttp(
+        portFromUrl(upstreamUrl),
+        upstreamUrl.pathname + upstreamUrl.search,
+        { method: request.method, headers },
+      );
+    } catch (err) {
+      app.log.warn({ err, slug, hostId: target.hostId }, "preview proxy: upstream unreachable");
+      return reply.badGateway(`dev server on host ${target.hostId} is unreachable`);
+    }
+    return relayFetchResponse(reply, request.method, upstreamResponse);
+  }
+
+  const headers = buildUpstreamRequestHeaders(request, upstreamUrl.host);
   let upstreamResponse: Response;
   try {
     upstreamResponse = await fetch(upstreamUrl, {
       method: request.method,
-      headers: buildUpstreamRequestHeaders(request, upstreamUrl.host),
+      headers,
       // Never auto-follow: forward the redirect to the browser as-is
       // rather than silently resolving it server-side (same
       // don't-trust-a-redirect posture as remote-host-client.ts, and it
@@ -180,56 +178,7 @@ async function handlePreviewRequest(
     return reply.badGateway(`dev server at ${upstreamUrl.origin} is unreachable`);
   }
 
-  reply.code(upstreamResponse.status);
-
-  // Explicit removal, not just "don't copy the upstream's own value": this
-  // hook runs *after* helmet's own onRequest hook (registration order —
-  // securityPlugin registers before this plugin), so helmet has already
-  // staged its own x-frame-options/CSP on this reply. Skipping the copy
-  // step for a stripped header only means "don't overwrite helmet's
-  // value" — it does nothing to *remove* it. Critically, `reply.raw`
-  // (Node's own ServerResponse), not just `reply`, needs clearing too:
-  // @fastify/helmet sets its headers by calling the `helmet` npm package's
-  // middleware directly against `reply.raw` (see its own index.js), which
-  // bypasses Fastify's `reply.header()` API — and `reply.removeHeader()`
-  // only clears Fastify's *own* internal header map, never `reply.raw`'s,
-  // so it's a silent no-op for anything helmet set this way. Without both
-  // calls, helmet's SAMEORIGIN/default-src 'self' survives untouched and
-  // blocks the dashboard from framing this exact response — the one thing
-  // this whole feature exists to make possible.
-  for (const name of STRIPPED_RESPONSE_HEADERS) {
-    reply.removeHeader(name);
-    if (reply.raw.hasHeader(name)) reply.raw.removeHeader(name);
-  }
-
-  // Grouped by header name (not just iterated + reply.header() per entry)
-  // so a multi-value header — Set-Cookie is the realistic case — round-trips
-  // as every value rather than only the last one Fastify's reply.header()
-  // would otherwise overwrite with.
-  const headersToSend = new Map<string, string[]>();
-  for (const [key, value] of upstreamResponse.headers) {
-    const lower = key.toLowerCase();
-    if (STRIPPED_RESPONSE_HEADERS.has(lower)) continue;
-    const existing = headersToSend.get(lower);
-    if (existing) existing.push(value);
-    else headersToSend.set(lower, [value]);
-  }
-  for (const [key, values] of headersToSend) {
-    reply.header(key, values.length === 1 ? values[0] : values);
-  }
-
-  if (request.method === "HEAD" || upstreamResponse.body === null) {
-    return reply.send();
-  }
-  return reply.send(Readable.fromWeb(upstreamResponse.body));
-}
-
-const BACKPRESSURE_MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
-
-function toWsUrl(url: URL): URL {
-  const wsUrl = new URL(url.href);
-  wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  return wsUrl;
+  return relayFetchResponse(reply, request.method, upstreamResponse);
 }
 
 function rejectUpgrade(socket: Duplex, statusLine: string) {
@@ -241,75 +190,6 @@ function rejectUpgrade(socket: Duplex, statusLine: string) {
   // own comment on why).
   socket.write(`HTTP/1.1 ${statusLine}\r\nConnection: close\r\n\r\n`);
   socket.destroy();
-}
-
-/**
- * Pipes frames between the browser's already-upgraded preview WS connection
- * and an upstream dev-server WS connection — the WS analog of
- * handlePreviewRequest above. Mirrors terminal.ts's own
- * proxyToRemoteAttach() backpressure/lifecycle handling frame-for-frame
- * (same BACKPRESSURE_MAX_BUFFERED_BYTES drop threshold, unconditional
- * message-handler registration so frames sent before the upstream opens
- * aren't silently dropped, close/error propagation both ways) rather than
- * reusing it directly — that function is PtyManager-attach-specific
- * (AttachSessionParams, hostId-keyed RemoteHostClient lookup), not a
- * generic two-socket pipe.
- */
-function pipePreviewWsFrames(
-  app: FastifyInstance,
-  browserSocket: NodeWebSocket,
-  upstream: NodeWebSocket,
-  slug: string,
-) {
-  const closeBrowser = () => {
-    if (browserSocket.readyState === NodeWebSocket.OPEN) browserSocket.close();
-  };
-  const closeUpstream = () => {
-    // A CLOSING upstream (already mid-close-handshake from some other
-    // trigger) is left alone rather than closed again — same as
-    // proxyToRemoteAttach's own closeUpstream, which this mirrors. In the
-    // rare case the browser side closes at that exact moment, the upstream
-    // simply finishes its own close on its own timeline rather than
-    // erroring on a double-close.
-    if (
-      upstream.readyState === NodeWebSocket.OPEN ||
-      upstream.readyState === NodeWebSocket.CONNECTING
-    ) {
-      upstream.close();
-    }
-  };
-
-  // Unconditional, not nested in upstream's "open" handler — same reasoning
-  // as proxyToRemoteAttach: the upstream connect isn't instant, and gating
-  // this on "open" would silently drop any frame the browser sends during
-  // that window.
-  browserSocket.on("message", (data, isBinary) => {
-    if (upstream.readyState !== NodeWebSocket.OPEN) return;
-    if (upstream.bufferedAmount > BACKPRESSURE_MAX_BUFFERED_BYTES) return;
-    upstream.send(data, { binary: isBinary });
-  });
-  browserSocket.on("close", closeUpstream);
-
-  upstream.on("close", closeBrowser);
-  upstream.on("error", (err) => {
-    app.log.warn({ err, slug }, "preview proxy: ws upstream error");
-    closeBrowser();
-  });
-
-  upstream.once("open", () => {
-    upstream.on("message", (data, isBinary) => {
-      if (browserSocket.readyState !== NodeWebSocket.OPEN) return;
-      if (browserSocket.bufferedAmount > BACKPRESSURE_MAX_BUFFERED_BYTES) return;
-      browserSocket.send(data, { binary: isBinary });
-    });
-  });
-  upstream.once("unexpected-response", (_req, res) => {
-    app.log.warn(
-      { slug, statusCode: res.statusCode },
-      "preview proxy: dev server rejected ws upgrade",
-    );
-    closeBrowser();
-  });
 }
 
 async function handlePreviewWsUpgrade(
@@ -335,27 +215,40 @@ async function handlePreviewWsUpgrade(
     return rejectUpgrade(socket, "503 Service Unavailable");
   }
 
+  const target = resolution.target;
+
   // Accept the browser's handshake first, then attempt the upstream
   // connection — mirrors proxyToRemoteAttach's own posture (a browser
   // socket that already exists gets closed, not left hanging, if the
   // upstream turns out to be unreachable) rather than delaying the
   // browser's handshake on an async upstream round-trip.
   previewWss.handleUpgrade(req, socket, head, (browserSocket) => {
-    const upstream = new NodeWebSocket(toWsUrl(upstreamUrl), {
-      headers: { host: upstreamUrl.host },
-    });
-    pipePreviewWsFrames(app, browserSocket, upstream, slug);
+    let upstream: NodeWebSocket;
+    if (isRemoteProjectTarget(target)) {
+      try {
+        upstream = getRemoteHostClient(app, target.hostId).openPreviewWs(
+          portFromUrl(upstreamUrl),
+          upstreamUrl.pathname + upstreamUrl.search,
+        );
+      } catch (err) {
+        app.log.error({ err, slug }, "preview proxy: failed to open remote preview ws");
+        if (browserSocket.readyState === NodeWebSocket.OPEN) browserSocket.close();
+        return;
+      }
+    } else {
+      upstream = new NodeWebSocket(toWsUrl(upstreamUrl), { headers: { host: upstreamUrl.host } });
+    }
+    pipeWsFrames(app, browserSocket, upstream, { slug });
   });
 }
 
 // Opt-in and inert with no PREVIEW_BASE_HOST configured (see plugins/env.ts)
 // — installs no hook at all rather than a proxy with nothing to resolve
-// against. Local (hostId === "local") project previews and external-URL
+// against. Local (hostId === "local") project previews, external-URL
 // previews (issue #28 phase 5, SSRF-guarded at creation time — see
-// url-guard.ts) are both served today; a remote-hosted project preview
-// (phase 6) resolves but responds "not supported yet" rather than a hard
-// error, so a client can distinguish "this slug will never work" from
-// "this slug isn't wired up in this phase."
+// url-guard.ts), and remote-hosted project previews (issue #28 phase 6,
+// two-hop via the owning agent's own /internal/preview* API) are all
+// served today.
 export const previewProxyPlugin = fp(async (app: FastifyInstance) => {
   const baseHost = app.config.PREVIEW_BASE_HOST.trim();
   if (baseHost === "") return;

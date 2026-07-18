@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import crypto from "node:crypto";
 import path from "node:path";
+import { WebSocket as NodeWebSocket } from "ws";
 import {
   discoverCandidates,
   expandHome,
@@ -13,6 +14,8 @@ import { getCachedAgents } from "../services/agent-detect.js";
 import { resolveGlobalPresets } from "./actions.js";
 import { attachSocketToSession } from "./terminal.js";
 import type { SessionInfo } from "../services/pty-manager.js";
+import { buildUpstreamRequestHeaders, relayFetchResponse } from "../services/http-proxy.js";
+import { pipeWsFrames, toWsUrl } from "../services/ws-pipe.js";
 
 interface SpawnSessionBody {
   id: string;
@@ -139,6 +142,62 @@ function resolveWithinRoots(app: FastifyInstance, cwd: string): string | null {
     (root) => resolved === root || resolved.startsWith(root + path.sep),
   );
   return withinRoots ? resolved : null;
+}
+
+// Same shape as projects.ts's DEV_SERVER_PORT_ONLY — a bare 1-65535 port,
+// nothing else. Used for both /internal/preview/:port/* and
+// /internal/ws/preview's ?port= (issue #28 phase 6).
+const PORT_PATTERN = /^\d{1,5}$/;
+
+function parsePort(value: string): number | null {
+  if (!PORT_PATTERN.test(value)) return null;
+  const port = Number(value);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
+/**
+ * Resolves a caller-supplied path+query (from the primary, ultimately
+ * derived from a browser's preview request) against this agent's own
+ * loopback dev server at `port` — and never anything else. This is the
+ * whole security promise of this phase (see projects.ts's own
+ * isValidDevServerUrl comment: "the preview proxy forces the connection to
+ * the owning agent's own loopback"), so it's deliberately not just "parse
+ * and trust": naively string-concatenating `pathAndQuery` into
+ * `http://127.0.0.1:${port}${pathAndQuery}` (or its ws:// equivalent) is
+ * bypassable — a network-path reference ("//evil.com/x") overrides the
+ * host entirely, and a leading "@evil.com/" turns "127.0.0.1:<port>" into
+ * HTTP userinfo with "evil.com" as the actual host — both confirmed via
+ * `new URL()` directly, not just reasoned about. The fix: `pathAndQuery` is
+ * first parsed *alone*, against a throwaway placeholder base, so any
+ * authority-like syntax it contains resolves into that placeholder's own
+ * host/userinfo — which is then thrown away, keeping only `.pathname` and
+ * `.search`. Only those two — guaranteed to start with "/" or be empty,
+ * never authority syntax — are then combined with the real,
+ * literally-constructed loopback base. The `hostname`/`port` assertion
+ * below is redundant with that construction by design; it's still worth
+ * asserting outright rather than trusting reasoning about which forms of
+ * `pathAndQuery` are safe (see internal.test.ts's adversarial cases for
+ * both).
+ */
+function resolveLoopbackPreviewUrl(pathAndQuery: string, port: number): URL | null {
+  // Both `new URL()` calls below can throw outright for a sufficiently
+  // malformed `pathAndQuery` (confirmed: a bracketed-but-invalid literal
+  // like "//[::a.b.c.d]/x" throws TypeError rather than just parsing into
+  // something this function would otherwise reject) — every caller already
+  // treats a null return as "reject with 400", so folding a parse failure
+  // into that same null case (Hermes review, PR #48) keeps this function's
+  // contract honest ("tells you whether the input is usable," not "usable
+  // unless it happens to throw") without pushing a try/catch onto every
+  // call site.
+  try {
+    const parsed = new URL(pathAndQuery, "http://internal-preview-placeholder/");
+    const upstreamUrl = new URL(parsed.pathname + parsed.search, `http://127.0.0.1:${port}`);
+    const resolvedPort = upstreamUrl.port === "" ? 80 : Number(upstreamUrl.port);
+    if (upstreamUrl.hostname !== "127.0.0.1" || resolvedPort !== port) return null;
+    return upstreamUrl;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -341,6 +400,92 @@ export async function internalRoutes(app: FastifyInstance) {
         cols,
         rows,
       });
+    },
+  );
+
+  // The two-hop preview proxy's agent-side half (issue #28 phase 6): the
+  // primary's own preview-proxy.ts forwards a browser's preview request
+  // here instead of dialing a remote-hosted project's dev server directly
+  // (which it has no network path to) — this agent dials it instead, on
+  // its own loopback only (see resolveLoopbackPreviewUrl above). `*` is
+  // Fastify's wildcard, always preceded by a literal "/" — safe because
+  // the primary's own upstreamUrl.pathname (preview-proxy.ts's
+  // buildUpstreamUrl) always starts with "/", so the request path here
+  // always has one too, even for the dev server's own root ("/internal/
+  // preview/5173/").
+  app.all<{ Params: { port: string } }>(
+    "/internal/preview/:port/*",
+    INTERNAL_RATE_LIMIT,
+    async (request, reply) => {
+      const port = parsePort(request.params.port);
+      if (port === null) return reply.badRequest("port must be 1-65535");
+
+      // request.raw.url, not Fastify's own decoded wildcard param: the
+      // exact bytes the primary sent (including the query string, which a
+      // wildcard route param wouldn't include) are what matter here, not
+      // a re-encoded reconstruction of them.
+      const prefix = `/internal/preview/${request.params.port}`;
+      const rawUrl = request.raw.url ?? "/";
+      const rest = rawUrl.startsWith(prefix) ? rawUrl.slice(prefix.length) : "/";
+
+      const upstreamUrl = resolveLoopbackPreviewUrl(rest || "/", port);
+      if (!upstreamUrl) return reply.badRequest("invalid preview path");
+
+      // Strips the caller's own "authorization" header — the bearer token
+      // this same request just authenticated with — before it reaches
+      // arbitrary project dev-server code (see buildUpstreamRequestHeaders'
+      // own comment on why this exclusion exists).
+      const headers = buildUpstreamRequestHeaders(request, upstreamUrl.host, ["authorization"]);
+
+      let upstreamResponse: Response;
+      try {
+        upstreamResponse = await fetch(upstreamUrl, {
+          method: request.method,
+          headers,
+          // Never auto-follow — forward the redirect to the primary (and,
+          // from there, the browser) as-is, same posture as
+          // preview-proxy.ts's own local-case fetch.
+          redirect: "manual",
+        });
+      } catch (err) {
+        app.log.warn({ err, port }, "internal preview proxy: upstream unreachable");
+        return reply.badGateway(`dev server on port ${port} is unreachable`);
+      }
+      return relayFetchResponse(reply, request.method, upstreamResponse);
+    },
+  );
+
+  // The WS analog of /internal/preview/:port/* above, for a remote-hosted
+  // project's HMR connection (issue #28 phase 6) — port and the dev
+  // server's own path+query travel as query params (a WS upgrade request
+  // has no body), validated and resolved against this agent's own loopback
+  // by the same resolveLoopbackPreviewUrl before the handshake completes.
+  app.get(
+    "/internal/ws/preview",
+    {
+      websocket: true,
+      config: INTERNAL_RATE_LIMIT.config,
+      preValidation: async (request, reply) => {
+        const query = request.query as Record<string, string | undefined>;
+        const port = query.port !== undefined ? parsePort(query.port) : null;
+        if (port === null) return reply.badRequest("port must be 1-65535");
+        if (query.path === undefined) return reply.badRequest("path query param is required");
+        if (!resolveLoopbackPreviewUrl(query.path, port)) {
+          return reply.badRequest("invalid preview path");
+        }
+      },
+    },
+    (socket, req) => {
+      const query = req.query as Record<string, string | undefined>;
+      // Re-derived, not trusted from preValidation's own run: cheap, pure,
+      // and already proven to succeed by preValidation passing at all.
+      const port = parsePort(query.port as string) as number;
+      const upstreamUrl = resolveLoopbackPreviewUrl(query.path as string, port) as URL;
+
+      const upstream = new NodeWebSocket(toWsUrl(upstreamUrl), {
+        headers: { host: upstreamUrl.host },
+      });
+      pipeWsFrames(app, socket, upstream, { port });
     },
   );
 }

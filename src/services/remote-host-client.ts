@@ -52,6 +52,12 @@ const REQUEST_TIMEOUT_MS = 5_000;
 // host its own HTTP round trip.
 const LIVE_STATUS_CACHE_TTL_MS = 1_500;
 
+// A preview asset request (issue #28 phase 6) can legitimately take longer
+// than REQUEST_TIMEOUT_MS's 5s — a dev server compiling a route on first
+// request (Vite/webpack's on-demand compilation) is a real, non-error delay
+// this proxy must not preempt.
+const PREVIEW_REQUEST_TIMEOUT_MS = 30_000;
+
 // spawn() and openAttach() both target the same session — same id/cwd/
 // command/size — just over HTTP vs. WS; kept as one shared shape rather
 // than two field-for-field-identical interfaces.
@@ -211,6 +217,69 @@ export class RemoteHostClient {
       rows: String(opts.rows),
     });
     return new NodeWebSocket(`${this.wsBaseUrl}/internal/ws/attach?${query.toString()}`, {
+      headers: { authorization: `Bearer ${this.token}` },
+    });
+  }
+
+  /**
+   * Forwards an HTTP preview request to this agent's own
+   * `/internal/preview/:port/*` (issue #28 phase 6) — the agent, not this
+   * process, dials the actual dev server, always on its own loopback (see
+   * internal.ts's own loopback assertion; `port` is never a caller-supplied
+   * host, only a number this method interpolates into the path). Returns
+   * the raw Response regardless of status (a 404/500 from the dev server is
+   * not this method's failure to report — only a network-level failure to
+   * reach the agent itself is, same distinction request()'s callers rely
+   * on but this method can't reuse it for: unlike request(), a non-2xx
+   * upstream status must pass through to the caller unchanged, not throw).
+   */
+  async openPreviewHttp(
+    port: number,
+    pathAndQuery: string,
+    init: { method: string; headers: Headers },
+  ): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${this.token}`);
+    try {
+      return await fetch(`${this.baseUrl}/internal/preview/${port}${pathAndQuery}`, {
+        method: init.method,
+        headers,
+        // "manual" here for the same reason request()'s own comment gives:
+        // a followed redirect would resend this bearer token whichever way
+        // the redirect's target points, cross-origin-redirect stripping
+        // rules notwithstanding — never rely on that instead of just not
+        // following. The dev server's own 3xx (relayed by the agent's
+        // /internal/preview handler as an ordinary response status, not an
+        // HTTP-level redirect of *this* fetch) reaches this method as an
+        // ordinary non-ok Response either way, which the caller forwards
+        // to the browser unchanged.
+        redirect: "manual",
+        signal: AbortSignal.timeout(PREVIEW_REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new HostUnreachableError(this.hostId, err);
+    }
+  }
+
+  /**
+   * Opens (but does not wait for) a WS connection to this agent's
+   * `/internal/ws/preview` (issue #28 phase 6) — the WS analog of
+   * openPreviewHttp above, and constructed the same bearer-header way as
+   * openAttach (the `ws` package is required for a request header the
+   * browser/global WebSocket API can't set). Callers (preview-proxy.ts) own
+   * the open/error/close lifecycle and the actual frame piping.
+   *
+   * No connect timeout, deliberately matching openAttach's own gap rather
+   * than a bespoke one just for this method (Hermes review, PR #48): if the
+   * agent accepts the TCP/WS handshake but its own loopback dev server
+   * never answers, this connection can sit open with nothing flowing. A
+   * hung *preview* pane is a lower-stakes failure mode than the equivalent
+   * for a terminal attach — worth fixing for both together in a follow-up,
+   * not diverging on here in isolation.
+   */
+  openPreviewWs(port: number, pathAndQuery: string): NodeWebSocket {
+    const query = new URLSearchParams({ port: String(port), path: pathAndQuery });
+    return new NodeWebSocket(`${this.wsBaseUrl}/internal/ws/preview?${query.toString()}`, {
       headers: { authorization: `Bearer ${this.token}` },
     });
   }
