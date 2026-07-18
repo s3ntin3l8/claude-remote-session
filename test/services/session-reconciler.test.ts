@@ -199,13 +199,14 @@ describe("reconcileExitedSessions", () => {
         req.on("data", (chunk) => (body += chunk));
         req.on("end", () => {
           const { ids } = JSON.parse(body) as { ids: string[] };
-          const result: Record<string, boolean> = {};
           // Simulate agent version skew / a partial response: every
-          // requested id gets an answer EXCEPT `omittedId`.
-          for (const id of ids) {
-            if (id !== omittedId) result[id] = true;
-          }
-          const payload = JSON.stringify(result);
+          // requested id gets an answer EXCEPT `omittedId`. Built via
+          // Map/fromEntries rather than a keyed assignment onto a plain
+          // object (CodeQL: remote property injection on a request-derived
+          // key — this is a test-only fake server with no real attack
+          // surface, but the safer shape is just as easy to write).
+          const entries = ids.filter((id) => id !== omittedId).map((id) => [id, true] as const);
+          const payload = JSON.stringify(Object.fromEntries(entries));
           res.writeHead(200, {
             "content-type": "application/json",
             "content-length": Buffer.byteLength(payload),
