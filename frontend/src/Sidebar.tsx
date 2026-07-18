@@ -3,13 +3,15 @@ import { useDashboardStore } from "./store.js";
 import { ConfirmButton } from "./ConfirmButton.js";
 import { CreateProjectModal } from "./CreateProjectModal.js";
 import { KebabMenu } from "./KebabMenu.js";
-import { api } from "./api.js";
-import type { DiscoveredProject, Project, Session } from "./api.js";
+import { api, LOCAL_HOST_ID } from "./api.js";
+import type { DiscoveredProject, Host, Project, Session } from "./api.js";
 import { TesseraMark } from "./assets/TesseraMark.js";
+import { Dropdown } from "./settings/primitives.js";
 import {
   ChevronDownIcon,
   CloseIcon,
   FolderIcon,
+  HostsIcon,
   PlusIcon,
   RenameIcon,
   SearchAlertIcon,
@@ -33,8 +35,16 @@ export function Sidebar({
   onOpenProjectLauncher,
   onOpenSettingsProjects,
 }: SidebarProps) {
-  const { projects, sessions, refreshProjects, refreshSessions, hideEndedSessions, createProject } =
-    useDashboardStore();
+  const {
+    projects,
+    sessions,
+    hosts,
+    refreshProjects,
+    refreshSessions,
+    refreshHosts,
+    hideEndedSessions,
+    createProject,
+  } = useDashboardStore();
   const [addProjectOpen, setAddProjectOpen] = useState(false);
   // Lifted here (rather than owned entirely inside DiscoverProjects) so the
   // "Welcome to Tessera" empty state's "Scan for repos" button can force it
@@ -44,7 +54,8 @@ export function Sidebar({
   useEffect(() => {
     void refreshProjects();
     void refreshSessions();
-  }, [refreshProjects, refreshSessions]);
+    void refreshHosts();
+  }, [refreshProjects, refreshSessions, refreshHosts]);
 
   return (
     <div className="sidebar">
@@ -86,6 +97,7 @@ export function Sidebar({
           <ProjectSection
             key={project.id}
             project={project}
+            hosts={hosts}
             // Deliberately NOT filtered to status === "active" by default —
             // an *exited* session (program ended on its own) still shows,
             // just dimmed, matching the design's States doc badge grid
@@ -113,11 +125,13 @@ export function Sidebar({
         collapsed={discoverCollapsed}
         onToggleCollapsed={() => setDiscoverCollapsed((v) => !v)}
         onOpenSettingsProjects={onOpenSettingsProjects}
+        hosts={hosts}
       />
       {addProjectOpen && (
         <CreateProjectModal
+          hosts={hosts}
           onClose={() => setAddProjectOpen(false)}
-          onCreate={(name, cwd) => createProject(name, cwd)}
+          onCreate={(name, cwd, hostId) => createProject(name, cwd, hostId)}
         />
       )}
     </div>
@@ -127,12 +141,14 @@ export function Sidebar({
 function ProjectSection({
   project,
   sessions,
+  hosts,
   onOpenSession,
   onSessionEnded,
   onOpenLauncher,
 }: {
   project: Project;
   sessions: Session[];
+  hosts: Host[];
   onOpenSession: (session: Session) => void;
   onSessionEnded: (session: Session) => void;
   onOpenLauncher: () => void;
@@ -152,6 +168,10 @@ function ProjectSection({
   const [editOpen, setEditOpen] = useState(false);
 
   const attentionCount = sessions.filter((s) => s.attention).length;
+  // Only a remote project needs a badge at all — the common single-host
+  // deployment never shows one, matching CreateProjectModal's own selector
+  // only appearing once a remote host exists.
+  const host = project.hostId !== LOCAL_HOST_ID ? hosts.find((h) => h.id === project.hostId) : null;
 
   return (
     <div className="project-row">
@@ -164,6 +184,12 @@ function ProjectSection({
         <span className="project-row-name" title={project.cwd}>
           {project.name}
         </span>
+        {host && (
+          <span className="project-host-badge" title={`Runs on host: ${host.name}`}>
+            <HostsIcon size={10} />
+            {host.name}
+          </span>
+        )}
         {attentionCount > 0 && <span className="project-attn-pill">{attentionCount}</span>}
         <span className="project-session-count">{sessions.length}</span>
         <button
@@ -322,29 +348,64 @@ function DiscoverProjects({
   collapsed,
   onToggleCollapsed,
   onOpenSettingsProjects,
+  hosts,
 }: {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onOpenSettingsProjects: () => void;
+  hosts: Host[];
 }) {
   const { createProject, refreshProjects } = useDashboardStore();
   const [candidates, setCandidates] = useState<DiscoveredProject[] | null>(null);
   const [added, setAdded] = useState<Set<string>>(new Set());
+  const [hostId, setHostId] = useState(LOCAL_HOST_ID);
+  const remoteHosts = hosts.filter((h) => h.id !== LOCAL_HOST_ID);
 
-  const load = () => {
+  // Deliberately doesn't reset `candidates` to null up front — switching
+  // hosts would otherwise flash the "0 found" empty state on every change
+  // instead of just replacing the list once the new host's results land.
+  // `added` resets alongside it (inside the same async callback, not
+  // synchronously in the effect body — react-hooks/set-state-in-effect):
+  // a cwd match is per-(hostId, cwd), same as the backend's own
+  // registeredCwds query in routes/projects.ts, so the previous host's
+  // "just added" set is meaningless once `forHostId` changes.
+  const load = (forHostId: string) => {
     api
-      .discoverProjects()
-      .then(setCandidates)
-      .catch(() => setCandidates([]));
+      .discoverProjects(forHostId)
+      .then((found) => {
+        setCandidates(found);
+        setAdded(new Set());
+      })
+      .catch(() => {
+        setCandidates([]);
+        setAdded(new Set());
+      });
   };
 
   useEffect(() => {
-    load();
-  }, []);
+    load(hostId);
+  }, [hostId]);
 
   if (candidates === null) return null;
 
   const remaining = candidates.filter((c) => !c.isRegistered && !added.has(c.cwd));
+
+  // Only rendered once a remote host actually exists — same "no extra UI
+  // for a single-host deployment" rule CreateProjectModal's own selector
+  // follows.
+  const hostPicker = remoteHosts.length > 0 && (
+    <span onClick={(e) => e.stopPropagation()}>
+      <Dropdown
+        small
+        value={hostId}
+        onChange={setHostId}
+        options={[
+          { value: LOCAL_HOST_ID, label: "This machine" },
+          ...remoteHosts.map((h) => ({ value: h.id, label: h.name })),
+        ]}
+      />
+    </span>
+  );
 
   if (remaining.length === 0) {
     return (
@@ -358,11 +419,12 @@ function DiscoverProjects({
             Tessera scanned your search roots but found no git projects. Point it at a folder that
             contains your repos.
           </div>
+          {hostPicker && <div style={{ marginTop: 8 }}>{hostPicker}</div>}
           <div className="empty-state-actions">
             <button className="empty-state-btn-primary" onClick={onOpenSettingsProjects}>
               Configure search roots
             </button>
-            <button className="empty-state-btn-secondary" onClick={load}>
+            <button className="empty-state-btn-secondary" onClick={() => load(hostId)}>
               Rescan
             </button>
           </div>
@@ -380,6 +442,7 @@ function DiscoverProjects({
         />
         <span className="discover-title">Discover projects</span>
         <span className="discover-count">{remaining.length} found</span>
+        {hostPicker}
       </div>
       {!collapsed && (
         <div className="discover-body">
@@ -391,7 +454,7 @@ function DiscoverProjects({
               <button
                 className="discover-add"
                 onClick={() => {
-                  void createProject(c.name, c.cwd).then(() => {
+                  void createProject(c.name, c.cwd, hostId).then(() => {
                     setAdded((prev) => new Set(prev).add(c.cwd));
                     void refreshProjects();
                   });

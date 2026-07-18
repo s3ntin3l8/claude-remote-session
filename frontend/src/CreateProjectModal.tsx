@@ -1,9 +1,15 @@
 import { useRef, useState } from "react";
-import { FolderIcon, CloseIcon } from "./icons.js";
+import { FolderIcon, CloseIcon, HostsIcon } from "./icons.js";
+import { LOCAL_HOST_ID } from "./api.js";
+import type { Host } from "./api.js";
+import { Dropdown } from "./settings/primitives.js";
 
 interface CreateProjectModalProps {
   onClose: () => void;
-  onCreate: (name: string, cwd: string) => Promise<unknown>;
+  // `hostId` is only ever passed to `onCreate` in "create" mode (see the
+  // host selector below) — a project's host can't change after creation
+  // (issue #26: cwd is host-specific), so "edit" callers ignore it.
+  onCreate: (name: string, cwd: string, hostId?: string) => Promise<unknown>;
   // Phase 4d: this same modal doubles as "Edit project" (kebab menu on a
   // project row), pre-filled with the project's current name/cwd — a
   // project has no edit surface otherwise. `onCreate` still fires with
@@ -11,6 +17,10 @@ interface CreateProjectModalProps {
   mode?: "create" | "edit";
   initialName?: string;
   initialPath?: string;
+  // Registered hosts (issue #26) — the selector only renders in "create"
+  // mode, and only once a remote host actually exists, so a single-host
+  // deployment sees no extra UI at all.
+  hosts?: Host[];
 }
 
 // Ported 1:1 from the design's "Add project" modal (Cmux Redesign.dc.html):
@@ -29,12 +39,15 @@ export function CreateProjectModal({
   mode = "create",
   initialName = "",
   initialPath = "",
+  hosts = [],
 }: CreateProjectModalProps) {
   const [path, setPath] = useState(initialPath);
   const [name, setName] = useState(initialName);
   const [namePlaceholder, setNamePlaceholder] = useState("my-project");
+  const [hostId, setHostId] = useState(LOCAL_HOST_ID);
   const isEdit = mode === "edit";
   const pathInputRef = useRef<HTMLInputElement>(null);
+  const remoteHosts = hosts.filter((h) => h.id !== LOCAL_HOST_ID);
 
   const trailingSegment = (p: string) => p.replace(/\/+$/, "").split("/").pop() || "my-project";
 
@@ -57,7 +70,7 @@ export function CreateProjectModal({
       return;
     }
     const finalName = name.trim() || trailingSegment(trimmedPath);
-    void onCreate(finalName, trimmedPath).then(onClose);
+    void onCreate(finalName, trimmedPath, isEdit ? undefined : hostId).then(onClose);
   };
 
   return (
@@ -81,6 +94,26 @@ export function CreateProjectModal({
         </div>
 
         <div className="create-modal-body">
+          {!isEdit && remoteHosts.length > 0 && (
+            <label className="create-modal-field">
+              <span className="create-modal-field-label">Host</span>
+              <span className="create-modal-input-row">
+                <HostsIcon size={15} style={{ color: "var(--muted)", flexShrink: 0 }} />
+                <Dropdown
+                  value={hostId}
+                  onChange={setHostId}
+                  options={[
+                    { value: LOCAL_HOST_ID, label: "This machine" },
+                    ...remoteHosts.map((h) => ({ value: h.id, label: h.name })),
+                  ]}
+                />
+              </span>
+              <span className="create-modal-field-hint">
+                The path below is resolved on the selected host, not this browser's machine.
+              </span>
+            </label>
+          )}
+
           <label className="create-modal-field">
             <span className="create-modal-field-label">Repository path</span>
             <span className="create-modal-input-row">
