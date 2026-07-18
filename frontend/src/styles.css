@@ -709,6 +709,21 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.project-host-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9.5px;
+  color: var(--muted);
+  border: 1px solid var(--border-soft);
+  padding: 1px 5px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .project-attn-pill {
   min-width: 15px;
   height: 15px;
@@ -2465,6 +2480,20 @@ body {
 }
 .settings-add-btn:hover {
   border-color: color-mix(in srgb, var(--accent-solid) 45%, var(--border));
+  color: var(--fg);
+}
+
+.settings-cascade-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 13px;
+  border: 1px solid color-mix(in srgb, var(--r) 40%, transparent);
+  background: color-mix(in srgb, var(--r) 10%, transparent);
+  border-radius: 10px;
+  font-size: 12px;
   color: var(--fg);
 }
 

@@ -3,6 +3,7 @@ import { api, DEFAULT_SETTINGS } from "./api.js";
 import type {
   AppSettings,
   Group,
+  Host,
   Project,
   Session,
   SettingsPatch,
@@ -143,6 +144,11 @@ interface DashboardState {
   sessions: Session[];
   workspaces: Workspace[];
   groups: Group[];
+  // Registered hosts (issue #26) — includes the always-present "local" row.
+  // Fetched independently of projects/sessions since it's needed wherever a
+  // host picker renders (CreateProjectModal, Sidebar's discovery flow),
+  // not just Settings -> Hosts.
+  hosts: Host[];
   // The full server-persisted preferences blob (Settings modal's "Everything
   // wired now" rework — see .claude/plans/i-want-to-rework-delegated-bonbon.md).
   // Seeded with DEFAULT_SETTINGS synchronously at store creation so every
@@ -175,9 +181,21 @@ interface DashboardState {
   refreshSessions: () => Promise<void>;
   refreshWorkspaces: () => Promise<void>;
   refreshGroups: () => Promise<void>;
-  createProject: (name: string, cwd: string) => Promise<Project>;
+  refreshHosts: () => Promise<void>;
+  createProject: (name: string, cwd: string, hostId?: string) => Promise<Project>;
   updateProject: (id: number, patch: Partial<Pick<Project, "name" | "cwd">>) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
+  createHost: (name: string, baseUrl: string, token: string) => Promise<Host>;
+  updateHost: (
+    id: string,
+    patch: Partial<{ name: string; baseUrl: string; token: string }>,
+  ) => Promise<void>;
+  // Rejects with the same conflict Error api.deleteHost throws (still-owns-
+  // projects) unless `cascade` is passed — the caller (Settings -> Hosts) is
+  // responsible for catching that and offering the cascade retry, matching
+  // the design of the underlying DELETE /api/hosts/:id endpoint.
+  deleteHost: (id: string, opts?: { cascade?: boolean }) => Promise<void>;
+  pingHost: (id: string) => Promise<boolean>;
   createSession: (
     projectId: number,
     command: string,
@@ -289,6 +307,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
     sessions: [],
     workspaces: [],
     groups: [],
+    hosts: [],
     settings: DEFAULT_SETTINGS,
     settingsLoaded: false,
     theme: readThemeHint(),
@@ -322,8 +341,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
       }
     },
 
-    createProject: async (name, cwd) => {
-      const project = await api.createProject(name, cwd);
+    createProject: async (name, cwd, hostId) => {
+      const project = await api.createProject(name, cwd, hostId);
       await get().refreshProjects();
       return project;
     },
@@ -425,6 +444,34 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
       // DELETE SET NULL) — refresh both so they reappear ungrouped instead of
       // looking like they vanished with the group.
       await Promise.all([get().refreshGroups(), get().refreshWorkspaces()]);
+    },
+
+    refreshHosts: async () => {
+      set({ hosts: await api.listHosts() });
+    },
+
+    createHost: async (name, baseUrl, token) => {
+      const host = await api.createHost(name, baseUrl, token);
+      await get().refreshHosts();
+      return host;
+    },
+
+    updateHost: async (id, patch) => {
+      await api.updateHost(id, patch);
+      await get().refreshHosts();
+    },
+
+    deleteHost: async (id, opts) => {
+      await api.deleteHost(id, opts);
+      // A cascade delete also removes the host's projects/sessions
+      // server-side — refresh all three so the sidebar doesn't keep
+      // showing now-deleted rows until the next unrelated refresh.
+      await Promise.all([get().refreshHosts(), get().refreshProjects(), get().refreshSessions()]);
+    },
+
+    pingHost: async (id) => {
+      const { online } = await api.pingHost(id);
+      return online;
     },
 
     hydrateSettings: async () => {

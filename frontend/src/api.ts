@@ -2,8 +2,26 @@ export interface Project {
   id: number;
   name: string;
   cwd: string;
+  // The host this project's files (and therefore its sessions) live on —
+  // "local" for this same process, or a registered remote host's id (issue
+  // #26). Every session under a project inherits its host.
+  hostId: string;
   createdAt: string;
 }
+
+// Mirrors src/services/host-registry.ts's HostSummary 1:1 — never carries a
+// token, just whether one is set (hasToken), same "no secrets over the API"
+// rule AppSettings/ServerInfo above already follow.
+export interface Host {
+  id: string;
+  name: string;
+  baseUrl: string | null;
+  isLocal: boolean;
+  hasToken: boolean;
+  createdAt: string;
+}
+
+export const LOCAL_HOST_ID = "local";
 
 export interface Session {
   id: number;
@@ -91,6 +109,7 @@ export interface DockControl {
 
 export interface ServerInfo {
   version: string;
+  role: "primary" | "agent";
   nodeEnv: string;
   port: number;
   encryptionEnabled: boolean;
@@ -215,6 +234,20 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
 };
 
+// Carries the HTTP status code alongside the backend's message so a caller
+// can branch on the actual response (e.g. Settings -> Hosts' cascade-delete
+// prompt checking `statusCode === 409`) instead of substring-matching
+// error text, which silently breaks the moment the backend's wording changes.
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -224,7 +257,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.message || `${path} failed with ${res.status}`);
+    throw new ApiError(body.message || `${path} failed with ${res.status}`, res.status);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
@@ -233,10 +266,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   listProjects: () => request<Project[]>("/api/projects"),
 
-  createProject: (name: string, cwd: string) =>
+  createProject: (name: string, cwd: string, hostId?: string) =>
     request<Project>("/api/projects", {
       method: "POST",
-      body: JSON.stringify({ name, cwd }),
+      body: JSON.stringify(hostId ? { name, cwd, hostId } : { name, cwd }),
     }),
 
   updateProject: (id: number, patch: Partial<Pick<Project, "name" | "cwd">>) =>
@@ -247,7 +280,10 @@ export const api = {
 
   deleteProject: (id: number) => request<void>(`/api/projects/${id}`, { method: "DELETE" }),
 
-  discoverProjects: () => request<DiscoveredProject[]>("/api/projects/discover"),
+  discoverProjects: (hostId?: string) =>
+    request<DiscoveredProject[]>(
+      `/api/projects/discover${hostId ? `?hostId=${encodeURIComponent(hostId)}` : ""}`,
+    ),
 
   listProjectActions: (projectId: number) =>
     request<Launcher[]>(`/api/projects/${projectId}/actions`),
@@ -340,4 +376,32 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
+
+  listHosts: () => request<Host[]>("/api/hosts"),
+
+  createHost: (name: string, baseUrl: string, token: string) =>
+    request<Host>("/api/hosts", {
+      method: "POST",
+      body: JSON.stringify({ name, baseUrl, token }),
+    }),
+
+  updateHost: (id: string, patch: Partial<{ name: string; baseUrl: string; token: string }>) =>
+    request<Host>(`/api/hosts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  // `?cascade=true` best-effort terminates every live session under this
+  // host's projects and deletes them along with it — see
+  // src/routes/hosts.ts's DELETE handler. Without it, a host that still
+  // owns projects 409s (surfaced to the caller as a thrown Error whose
+  // message names the project count, per request()'s body.message handling
+  // above).
+  deleteHost: (id: string, opts?: { cascade?: boolean }) =>
+    request<void>(`/api/hosts/${encodeURIComponent(id)}${opts?.cascade ? "?cascade=true" : ""}`, {
+      method: "DELETE",
+    }),
+
+  pingHost: (id: string) =>
+    request<{ online: boolean }>(`/api/hosts/${encodeURIComponent(id)}/ping`, { method: "POST" }),
 };

@@ -27,6 +27,12 @@ export async function serverInfoRoute(app: FastifyInstance) {
   app.get("/api/server-info", async () => {
     return {
       version: appVersion,
+      // "primary" always, in practice — this route only registers on the
+      // primary role branch (src/app.ts skips it for "agent"), but surfaced
+      // anyway so the Settings -> Server info tab has a single source for
+      // it rather than the frontend hardcoding an assumption about which
+      // role it's always talking to.
+      role: app.config.TESSERA_ROLE,
       nodeEnv: app.config.NODE_ENV,
       port: app.config.PORT,
       encryptionEnabled: app.config.DB_ENCRYPTION_KEY.length > 0,

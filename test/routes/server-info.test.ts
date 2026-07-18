@@ -24,6 +24,7 @@ describe("server-info route", () => {
     const body = res.json();
 
     expect(body).toMatchObject({
+      role: "primary",
       nodeEnv: "test",
       encryptionEnabled: false,
       sessionsDir: expect.any(String),

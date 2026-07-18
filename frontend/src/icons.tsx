@@ -368,3 +368,19 @@ export function LayersIcon(props: IconProps) {
     </Svg>
   );
 }
+
+// Not part of the reference design (multi-host support, issue #26, postdates
+// the original Settings nav port above) — a plain three-node network glyph
+// for the Hosts settings tab, in the same simple-line-icon style as its
+// neighbors rather than a byte-exact design port.
+export function HostsIcon(props: IconProps) {
+  return (
+    <Svg strokeWidth={1.7} {...props}>
+      <circle cx="12" cy="5" r="2.4" />
+      <circle cx="5" cy="18" r="2.4" />
+      <circle cx="19" cy="18" r="2.4" />
+      <line x1="10.4" y1="6.9" x2="6.6" y2="16.1" />
+      <line x1="13.6" y1="6.9" x2="17.4" y2="16.1" />
+    </Svg>
+  );
+}

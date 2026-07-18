@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useDashboardStore } from "./store.js";
-import { api } from "./api.js";
-import type { Agent, ServerInfo, SoundName } from "./api.js";
+import { api, ApiError, LOCAL_HOST_ID } from "./api.js";
+import type { Agent, Host, ServerInfo, SoundName } from "./api.js";
+import { CreateHostModal } from "./CreateHostModal.js";
+import { KebabMenu } from "./KebabMenu.js";
 import {
   AppearanceIcon,
   BellIcon,
   BoltIcon,
   CloseIcon,
   FolderIcon,
+  HostsIcon,
   LayersIcon,
   PlusIcon,
   RefreshIcon,
+  RenameIcon,
   SearchIcon,
   ServerRackIcon,
   TerminalPromptIcon,
@@ -31,7 +35,14 @@ import {
 import { SwatchGrid, TerminalPreview } from "./settings/TerminalPreview.js";
 
 export type SettingsSection =
-  "appearance" | "terminal" | "projects" | "launchers" | "notifications" | "sessions" | "server";
+  | "appearance"
+  | "terminal"
+  | "projects"
+  | "hosts"
+  | "launchers"
+  | "notifications"
+  | "sessions"
+  | "server";
 
 const SECTIONS: Array<{
   id: SettingsSection;
@@ -56,6 +67,12 @@ const SECTIONS: Array<{
     title: "Projects & discovery",
     desc: "Where Tessera scans for repositories.",
     icon: (size) => <FolderIcon size={size} />,
+  },
+  {
+    id: "hosts",
+    title: "Hosts",
+    desc: "Remote machines Tessera can run sessions on.",
+    icon: (size) => <HostsIcon size={size} />,
   },
   {
     id: "launchers",
@@ -104,6 +121,9 @@ const SEARCH_INDEX: Array<{ section: SettingsSection; text: string }> = [
   { section: "projects", text: "project roots add root directory" },
   { section: "projects", text: "discover now rescan" },
   { section: "projects", text: "global config directory" },
+  { section: "hosts", text: "remote host agent register base url token" },
+  { section: "hosts", text: "test connection ping online offline" },
+  { section: "hosts", text: "cascade delete host projects" },
   { section: "launchers", text: "detected clis shells agents refresh" },
   { section: "launchers", text: "default shell" },
   { section: "launchers", text: "default agent" },
@@ -116,7 +136,7 @@ const SEARCH_INDEX: Array<{ section: SettingsSection; text: string }> = [
   { section: "sessions", text: "confirm before kill" },
   { section: "sessions", text: "show exited killed sessions" },
   { section: "sessions", text: "auto reconcile interval" },
-  { section: "server", text: "version environment port encryption uptime" },
+  { section: "server", text: "version environment port encryption uptime role primary agent" },
   { section: "server", text: "sessions directory database rate limit" },
 ];
 
@@ -204,6 +224,7 @@ export function Settings({
               {section === "appearance" && <AppearanceSection />}
               {section === "terminal" && <TerminalSection />}
               {section === "projects" && <ProjectsSection />}
+              {section === "hosts" && <HostsSection />}
               {section === "launchers" && <LaunchersSection />}
               {section === "notifications" && <NotificationsSection />}
               {section === "sessions" && <SessionsSection />}
@@ -497,6 +518,194 @@ function ProjectsSection() {
   );
 }
 
+// Per-row connection-test state (Settings -> Hosts' "Test connection"
+// button) — deliberately not part of the store's `hosts` state: it's
+// ephemeral UI feedback from POST /api/hosts/:id/ping, not data about the
+// host itself, same reasoning as LaunchersSection's local `copied` flag.
+type PingStatus = "unknown" | "checking" | "online" | "offline";
+
+function HostsSection() {
+  const { hosts, refreshHosts, createHost, updateHost, deleteHost, pingHost } = useDashboardStore();
+  const [addOpen, setAddOpen] = useState(false);
+  const [editing, setEditing] = useState<Host | null>(null);
+  const [pingStatus, setPingStatus] = useState<Record<string, PingStatus>>({});
+  // A host that 409s on delete (still owns projects) — offers a cascade
+  // retry inline instead of a second confirm dialog, since the backend's
+  // own error message already names the project count.
+  const [cascadePrompt, setCascadePrompt] = useState<{ id: string; message: string } | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Sidebar.tsx's own mount effect already fetches `hosts` in practice
+  // (it's always mounted alongside Settings), but relying on that as a
+  // hidden cross-file invariant is fragile — a lone Settings render (or a
+  // future change to when Sidebar mounts) would otherwise show a stale
+  // list until the next mutation. This fetch is cheap; the duplication is
+  // an acceptable cost for not coupling this section's correctness to
+  // another file's mount order (Hermes review, PR #35).
+  useEffect(() => {
+    void refreshHosts();
+  }, [refreshHosts]);
+
+  const testConnection = (id: string) => {
+    setPingStatus((prev) => ({ ...prev, [id]: "checking" }));
+    void pingHost(id)
+      .then((online) => setPingStatus((prev) => ({ ...prev, [id]: online ? "online" : "offline" })))
+      .catch(() => setPingStatus((prev) => ({ ...prev, [id]: "offline" })));
+  };
+
+  const handleDelete = (host: Host) => {
+    setDeleteError(null);
+    void deleteHost(host.id).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      // 409 is src/routes/hosts.ts's HostHasProjectsError (still owns
+      // projects) — branching on the status code rather than matching the
+      // message text ("...pass ?cascade=true") keeps this from silently
+      // breaking if that wording ever changes; anything else (unreachable,
+      // 404) surfaces as a plain inline error instead.
+      if (err instanceof ApiError && err.statusCode === 409) {
+        setCascadePrompt({ id: host.id, message });
+      } else {
+        setDeleteError(message);
+      }
+    });
+  };
+
+  const confirmCascadeDelete = () => {
+    if (!cascadePrompt) return;
+    const { id } = cascadePrompt;
+    setCascadePrompt(null);
+    void deleteHost(id, { cascade: true }).catch((err: unknown) => {
+      setDeleteError(err instanceof Error ? err.message : String(err));
+    });
+  };
+
+  return (
+    <>
+      <GroupHeading
+        title="Registered hosts"
+        desc="Remote Tessera agents this dashboard can proxy sessions to."
+      />
+      <StyledList>
+        <ListRow
+          icon={<HostsIcon size={15} />}
+          dot="on"
+          title="This machine"
+          subtitle="local"
+          trailing={<span style={{ fontSize: 10.5, color: "var(--dim)" }}>always online</span>}
+        />
+        {hosts
+          .filter((h) => h.id !== LOCAL_HOST_ID)
+          .map((host) => {
+            const status = pingStatus[host.id] ?? "unknown";
+            return (
+              <ListRow
+                key={host.id}
+                icon={<HostsIcon size={15} />}
+                dot={status === "online" ? "on" : status === "offline" ? "off" : undefined}
+                title={host.name}
+                subtitle={host.baseUrl ?? ""}
+                trailing={
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {status !== "unknown" && (
+                      <span
+                        style={{
+                          fontSize: 10.5,
+                          color:
+                            status === "online"
+                              ? "var(--g)"
+                              : status === "checking"
+                                ? "var(--dim)"
+                                : "var(--r)",
+                        }}
+                      >
+                        {status === "checking" ? "testing…" : status}
+                      </span>
+                    )}
+                    <SecondaryButton
+                      onClick={() => testConnection(host.id)}
+                      disabled={status === "checking"}
+                    >
+                      Test
+                    </SecondaryButton>
+                    <KebabMenu
+                      title="More…"
+                      items={[
+                        {
+                          key: "edit",
+                          label: "Edit",
+                          icon: <RenameIcon size={14} style={{ color: "var(--muted)" }} />,
+                          onClick: () => setEditing(host),
+                        },
+                        {
+                          key: "delete",
+                          label: "Delete host",
+                          armLabel: "Click again to delete",
+                          icon: <CloseIcon size={14} />,
+                          danger: true,
+                          confirm: true,
+                          onClick: () => handleDelete(host),
+                        },
+                      ]}
+                    />
+                  </div>
+                }
+              />
+            );
+          })}
+      </StyledList>
+
+      {cascadePrompt && (
+        <div className="settings-cascade-warning">
+          <span>{cascadePrompt.message}</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <SecondaryButton onClick={confirmCascadeDelete}>
+              Delete host and its projects
+            </SecondaryButton>
+            <SecondaryButton onClick={() => setCascadePrompt(null)}>Cancel</SecondaryButton>
+          </div>
+        </div>
+      )}
+      {deleteError && !cascadePrompt && (
+        <div style={{ fontSize: 12, color: "var(--r)", marginTop: 8 }} role="alert">
+          {deleteError}
+        </div>
+      )}
+
+      <div style={{ marginTop: 10 }}>
+        <button className="settings-add-btn" onClick={() => setAddOpen(true)}>
+          <PlusIcon size={13} />
+          Add a host
+        </button>
+      </div>
+
+      {hosts.filter((h) => h.id !== LOCAL_HOST_ID).length === 0 && (
+        <div style={{ fontSize: 11.5, color: "var(--dim)", marginTop: 10 }}>
+          No remote hosts registered — every project runs on this machine until you add one.
+        </div>
+      )}
+
+      {addOpen && (
+        <CreateHostModal
+          onClose={() => setAddOpen(false)}
+          onSave={(name, baseUrl, token) => createHost(name, baseUrl, token)}
+        />
+      )}
+      {editing && (
+        <CreateHostModal
+          mode="edit"
+          initialName={editing.name}
+          initialBaseUrl={editing.baseUrl ?? ""}
+          hasToken={editing.hasToken}
+          onClose={() => setEditing(null)}
+          onSave={(name, baseUrl, token) =>
+            updateHost(editing.id, token ? { name, baseUrl, token } : { name, baseUrl })
+          }
+        />
+      )}
+    </>
+  );
+}
+
 const SHELL_OPTIONS = [
   { value: "zsh", label: "zsh" },
   { value: "bash", label: "bash" },
@@ -780,6 +989,10 @@ function ServerInfoSection() {
         <div className="settings-stat-card">
           <div className="settings-stat-label">Version</div>
           <div className="settings-stat-value">{info.version}</div>
+        </div>
+        <div className="settings-stat-card">
+          <div className="settings-stat-label">Role</div>
+          <div className="settings-stat-value">{info.role === "primary" ? "Primary" : "Agent"}</div>
         </div>
         <div className="settings-stat-card">
           <div className="settings-stat-label">Environment</div>
