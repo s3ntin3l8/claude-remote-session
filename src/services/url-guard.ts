@@ -48,7 +48,10 @@ function isPrivateIPv4(octets: IPv4Octets): boolean {
 
 // IPv6 analogs of the checks above: link-local (fe80::/10, IPv6's
 // 169.254.0.0/16), AWS's IPv6 instance-metadata address specifically,
-// loopback (::1), and unique-local (fc00::/7, IPv6's RFC1918 analog).
+// loopback (::1), the unspecified address (::, IPv6's analog of IPv4
+// 0.0.0.0 — also caught below via isPrivateIPv4's `a === 0` arm, and
+// connects to localhost on most stacks, so this is a real loopback bypass
+// if left unblocked), and unique-local (fc00::/7, IPv6's RFC1918 analog).
 // `URL#hostname` keeps the brackets for an IPv6 literal (e.g. "[fe80::1]"),
 // so strip them first. Matched against a handful of equivalent textual
 // forms rather than full RFC 4291 zero-compression canonicalization, which
@@ -96,7 +99,7 @@ function isBlockedIPv6(hostname: string, policy: UrlGuardPolicy): boolean {
   if (!hostname.startsWith("[") || !hostname.endsWith("]")) return false;
   const addr = hostname.slice(1, -1).toLowerCase();
   if (IPV6_LINK_LOCAL.test(addr) || IPV6_IMDS_FORMS.has(addr)) return true;
-  if (!policy.allowLoopback && addr === "::1") return true;
+  if (!policy.allowLoopback && (addr === "::1" || addr === "::")) return true;
   if (!policy.allowPrivate && IPV6_UNIQUE_LOCAL.test(addr)) return true;
   const mappedV4 = ipv4MappedToOctets(addr);
   if (mappedV4 && isBlockedIPv4(mappedV4, policy)) return true;

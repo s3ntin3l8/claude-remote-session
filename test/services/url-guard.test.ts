@@ -55,12 +55,21 @@ describe("url-guard", () => {
       expect(isAllowedHttpUrl("http://127.255.255.255", BLOCK_ALL)).toBe(false);
       expect(isAllowedHttpUrl("http://[::1]", BLOCK_ALL)).toBe(false);
     });
+
+    it("blocks the IPv6 unspecified address :: (Hermes review, PR #47 — connects to localhost on most stacks, same as IPv4 0.0.0.0)", () => {
+      expect(isAllowedHttpUrl("http://[::]", BLOCK_ALL)).toBe(false);
+      expect(isAllowedHttpUrl("http://[::]:1", BLOCK_ALL)).toBe(false);
+    });
   });
 
   describe("allowLoopback: true", () => {
     it("allows IPv4 and IPv6 loopback", () => {
       expect(isAllowedHttpUrl("http://127.0.0.1", ALLOW_ALL)).toBe(true);
       expect(isAllowedHttpUrl("http://[::1]", ALLOW_ALL)).toBe(true);
+    });
+
+    it("allows the IPv6 unspecified address ::", () => {
+      expect(isAllowedHttpUrl("http://[::]", ALLOW_ALL)).toBe(true);
     });
   });
 
