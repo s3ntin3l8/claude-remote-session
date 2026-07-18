@@ -51,7 +51,13 @@ export function BrowserPanel({ params }: { params: BrowserPanelParams }) {
       .getServerInfo()
       .then((info) => {
         if (cancelled) return;
-        if (!info.previewsEnabled) {
+        if (!info.previewsEnabled || !info.previewBaseHost) {
+          // Belt-and-suspenders: the real guard is server-side
+          // (previewsEnabled is derived from PREVIEW_BASE_HOST being
+          // non-empty — see src/routes/server-info.ts — so these two
+          // conditions should never actually disagree). Checked together
+          // anyway so a future server-side change that decouples them can't
+          // silently build an invalid host like "preview-<slug>./" here.
           setFetchState({
             status: "unavailable",
             message: "Browser preview isn't enabled on this server (PREVIEW_BASE_HOST is unset).",

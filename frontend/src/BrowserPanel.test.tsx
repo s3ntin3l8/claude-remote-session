@@ -69,6 +69,26 @@ describe("BrowserPanel", () => {
     expect(await screen.findByText(/isn't enabled on this server/i)).toBeInTheDocument();
   });
 
+  it("shows the same not-applicable message if previewsEnabled is true but previewBaseHost is somehow empty", async () => {
+    // Defensive-only case (Hermes review, PR #46): server-info's two fields
+    // should never actually disagree (previewsEnabled is derived from
+    // PREVIEW_BASE_HOST being non-empty), but this guards against silently
+    // building an invalid host like "preview-<slug>./" if they ever do.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          jsonResponse(200, { ...SERVER_INFO_BASE, previewsEnabled: true, previewBaseHost: "" }),
+        ),
+      ),
+    );
+    useDashboardStore.setState({ projects: [PROJECT] });
+
+    render(<BrowserPanel params={{ projectId: 1 }} />);
+
+    expect(await screen.findByText(/isn't enabled on this server/i)).toBeInTheDocument();
+  });
+
   it("renders an iframe pointed at the resolved preview subdomain once everything is available", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
