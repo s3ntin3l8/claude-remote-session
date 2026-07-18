@@ -113,7 +113,13 @@ interface GitHubWorkflowRunApiItem {
 function computeCiStatus(runs: GitHubActionsRun[]): GitHubCiStatus {
   if (runs.length === 0) return null;
   if (runs.some((r) => r.status !== "completed")) return "in_progress";
-  return runs.every((r) => r.conclusion === "success") ? "success" : "failure";
+  // `skipped`/`cancelled` aren't a pass or a fail — excluding them from the
+  // aggregate keeps a workflow someone disabled/skipped from painting the
+  // dot red (Hermes review, PR #42). If every run is skipped/cancelled,
+  // there's no real signal at all — same as no runs existing.
+  const meaningful = runs.filter((r) => r.conclusion !== "skipped" && r.conclusion !== "cancelled");
+  if (meaningful.length === 0) return null;
+  return meaningful.every((r) => r.conclusion === "success") ? "success" : "failure";
 }
 
 /**
@@ -151,8 +157,13 @@ async function fetchActionsRuns(
     const defaultBranch = repoData.default_branch;
     if (!defaultBranch) return [];
 
+    // 100 is GitHub's own max per_page — a repo with more than 100 distinct
+    // workflow names on its default branch would still undercount here, but
+    // that's an extreme case; 20 (the prior value) risked missing workflows
+    // in an ordinary monorepo with more than a handful of them (Hermes
+    // review, PR #42).
     const runsRes = await fetch(
-      `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs?branch=${encodeURIComponent(defaultBranch)}&per_page=20`,
+      `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs?branch=${encodeURIComponent(defaultBranch)}&per_page=100`,
       { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
     );
     if (!runsRes.ok) return [];

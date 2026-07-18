@@ -203,6 +203,24 @@ describe("getRepoStatus", () => {
       expect(status.ciStatus).toBe("in_progress");
     });
 
+    it("treats skipped/cancelled runs as neutral, not a failure (Hermes review, PR #42)", async () => {
+      const skipped = { ...RUN_SUCCESS, name: "Deploy", conclusion: "skipped" };
+      fetchMock = mockGithubApi({ issues: [], runs: [RUN_SUCCESS, skipped] });
+      vi.stubGlobal("fetch", fetchMock);
+      const status = await getRepoStatus("tok", "ci-skipped-owner", "repo");
+      // One real success, one skipped (excluded) — still overall success,
+      // not dragged to failure just because a workflow was skipped.
+      expect(status.ciStatus).toBe("success");
+    });
+
+    it("reports ciStatus null when every latest run is skipped/cancelled", async () => {
+      const cancelled = { ...RUN_SUCCESS, conclusion: "cancelled" };
+      fetchMock = mockGithubApi({ issues: [], runs: [cancelled] });
+      vi.stubGlobal("fetch", fetchMock);
+      const status = await getRepoStatus("tok", "ci-all-cancelled-owner", "repo");
+      expect(status.ciStatus).toBeNull();
+    });
+
     it("keeps only the first (most recent) run per workflow name", async () => {
       const older = { ...RUN_SUCCESS, html_url: "https://github.com/o/r/actions/runs/0" };
       fetchMock = mockGithubApi({ issues: [], runs: [RUN_FAILURE, older] });
