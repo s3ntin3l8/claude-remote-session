@@ -50,7 +50,6 @@ describe("CommandPalette -> Integrations section", () => {
         onLaunched={vi.fn()}
         onOpenGitHub={onOpenGitHub}
         onOpenBrowser={vi.fn()}
-        onOpenUrlModal={vi.fn()}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
@@ -71,7 +70,6 @@ describe("CommandPalette -> Integrations section", () => {
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
         onOpenBrowser={onOpenBrowser}
-        onOpenUrlModal={vi.fn()}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
@@ -81,49 +79,7 @@ describe("CommandPalette -> Integrations section", () => {
     expect(onOpenBrowser).toHaveBeenCalledWith(PROJECT.id);
   });
 
-  it("opens the URL modal (issue #28's general-purpose browser tile)", async () => {
-    const onOpenUrlModal = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <CommandPalette
-        scope="project"
-        projectId={PROJECT.id}
-        onClose={vi.fn()}
-        onLaunched={vi.fn()}
-        onOpenGitHub={vi.fn()}
-        onOpenBrowser={vi.fn()}
-        onOpenUrlModal={onOpenUrlModal}
-        onOpenBlankBrowser={vi.fn()}
-        onOpenIntegrationsSettings={vi.fn()}
-      />,
-    );
-
-    await user.click(await screen.findByText("Open URL…"));
-    expect(onOpenUrlModal).toHaveBeenCalled();
-  });
-
-  it("shows the Open URL row even in global scope (project-independent)", async () => {
-    const onOpenUrlModal = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <CommandPalette
-        scope="global"
-        projectId={null}
-        onClose={vi.fn()}
-        onLaunched={vi.fn()}
-        onOpenGitHub={vi.fn()}
-        onOpenBrowser={vi.fn()}
-        onOpenUrlModal={onOpenUrlModal}
-        onOpenBlankBrowser={vi.fn()}
-        onOpenIntegrationsSettings={vi.fn()}
-      />,
-    );
-
-    await user.click(await screen.findByText("Open URL…"));
-    expect(onOpenUrlModal).toHaveBeenCalled();
-  });
-
-  it("opens a blank browser tab, project-independent, without going through the URL modal", async () => {
+  it("opens a blank browser tab, project-independent (issue #28's general-purpose browser tile)", async () => {
     const onOpenBlankBrowser = vi.fn();
     const user = userEvent.setup();
     render(
@@ -134,7 +90,6 @@ describe("CommandPalette -> Integrations section", () => {
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
         onOpenBrowser={vi.fn()}
-        onOpenUrlModal={vi.fn()}
         onOpenBlankBrowser={onOpenBlankBrowser}
         onOpenIntegrationsSettings={vi.fn()}
       />,
@@ -155,7 +110,6 @@ describe("CommandPalette -> Integrations section", () => {
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
         onOpenBrowser={vi.fn()}
-        onOpenUrlModal={vi.fn()}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={onOpenIntegrationsSettings}
       />,
@@ -175,7 +129,6 @@ describe("CommandPalette -> Integrations section", () => {
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
         onOpenBrowser={vi.fn()}
-        onOpenUrlModal={vi.fn()}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,

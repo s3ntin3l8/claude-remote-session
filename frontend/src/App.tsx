@@ -10,7 +10,6 @@ import { GitHubPanel } from "./GitHubPanel.js";
 import type { GitHubPanelParams } from "./GitHubPanel.js";
 import { BrowserPanel } from "./BrowserPanel.js";
 import type { BrowserPanelParams } from "./BrowserPanel.js";
-import { OpenUrlModal } from "./OpenUrlModal.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { Toolbar } from "./Toolbar.js";
 import { PaneTab } from "./PaneTab.js";
@@ -21,7 +20,6 @@ import type { SettingsSection } from "./Settings.js";
 import { Dock } from "./Dock.js";
 import { GridIcon, ServerRackIcon } from "./icons.js";
 import { useDashboardStore, LIVE_REFRESH_INTERVAL_MS } from "./store.js";
-import { api } from "./api.js";
 import type { Session } from "./api.js";
 import { playNotificationSound } from "./notifySound.js";
 
@@ -110,10 +108,6 @@ export function App() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");
-  // Issue #28's "general-purpose browser tile" entry point — CommandPalette's
-  // own "Open URL…" row (project-independent, unlike its Integrations
-  // section) triggers this.
-  const [openUrlModalOpen, setOpenUrlModalOpen] = useState(false);
   // Bumped on every dockview layout change so the toolbar's pane count and
   // the mobile switcher's tab list re-render off dockviewApi.panels, which
   // dockview itself doesn't expose as reactive state.
@@ -487,54 +481,17 @@ export function App() {
     [dockviewApi, projects, isMobile],
   );
 
-  // Issue #28's general-purpose browser tile: creates an external preview
-  // for `url` and opens a new pane for it. Created *here*, not left for
-  // BrowserPanel's own effect to do on mount, so a rejected URL (e.g.
-  // url-guard.ts blocking a private/loopback target) surfaces its error in
-  // OpenUrlModal itself — matching CreateHostModal's own
-  // await-then-show-inline-error convention — instead of opening a pane
-  // that immediately shows "unavailable". The resulting slug is threaded
-  // into params so BrowserPanel's first mount reuses it rather than
-  // creating a second, redundant preview row for the same URL.
-  //
-  // Skips the POST entirely when the subdomain proxy isn't configured
-  // (PREVIEW_BASE_HOST unset — that route isn't even registered, see
-  // routes/previews.ts's own opt-in gate; firing it anyway is exactly the
-  // "Route POST:/api/previews not found" bug this fixed) — BrowserPanel's
-  // own direct-embed branch builds the iframe src from `url` itself in that
-  // case, so there's nothing to pre-create or reject client-side.
-  //
-  // Stable panel id is derived from the slug when one exists (unlike
-  // onOpenBrowser's projectId-derived id above) since an external URL has
-  // no other natural stable identity; falls back to a random id when there
-  // is no slug (direct-embed mode). Always opens a fresh pane rather than
+  // Issue #28's general-purpose browser tile: the CommandPalette's "New
+  // browser tab" entry — an empty external browser pane (nothing typed
+  // into its address bar yet; BrowserPanel's own "empty" state, address
+  // bar auto-focused), reachable straight from +/⌘K. No preview to
+  // pre-create (there's no URL yet, and the subdomain proxy — when
+  // configured — only ever gets involved once BrowserPanel's own mount
+  // effect creates one for whatever URL the user navigates to), so this
+  // never touches the network itself. Always opens a fresh pane rather than
   // open-or-focus: unlike a project (at most one preview pane makes sense),
-  // the same URL opened twice is a reasonable thing to want (e.g. comparing
-  // two states of the same page).
-  const onOpenExternalUrl = useCallback(
-    async (url: string) => {
-      if (!dockviewApi) return;
-      const info = await api.getServerInfo();
-      const preview = info.previewsEnabled ? await api.createExternalPreview(url) : null;
-      const panelId = `browser-ext-${preview?.slug ?? crypto.randomUUID()}`;
-      const panel = dockviewApi.addPanel({
-        id: panelId,
-        component: "browser",
-        title: "Preview",
-        params: preview ? { kind: "external", url, slug: preview.slug } : { kind: "external", url },
-      });
-      if (isMobile) dockviewApi.maximizeGroup(panel);
-      setSidebarOpen(false);
-    },
-    [dockviewApi, isMobile],
-  );
-
-  // The CommandPalette's "New browser tab" entry — a general-purpose
-  // browser pane with nothing typed into its address bar yet, reachable
-  // straight from +/⌘K without going through OpenUrlModal first. No preview
-  // to pre-create (there's no URL yet), so unlike onOpenExternalUrl this
-  // never touches the network. Always opens a fresh pane; id has no natural
-  // stable identity to derive from, same reasoning as the fallback above.
+  // opening a second blank tab is a reasonable, ordinary thing to want; id
+  // has no natural stable identity to derive from, so it's random.
   const onOpenBlankBrowser = useCallback(() => {
     if (!dockviewApi) return;
     const panel = dockviewApi.addPanel({
@@ -749,15 +706,11 @@ export function App() {
           onOpenGitHub={onOpenGitHub}
           onOpenBrowser={onOpenBrowser}
           onOpenIntegrationsSettings={() => openSettings("integrations")}
-          onOpenUrlModal={() => setOpenUrlModalOpen(true)}
           onOpenBlankBrowser={onOpenBlankBrowser}
         />
       )}
       {settingsOpen && (
         <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
-      )}
-      {openUrlModalOpen && (
-        <OpenUrlModal onClose={() => setOpenUrlModalOpen(false)} onOpen={onOpenExternalUrl} />
       )}
     </div>
   );

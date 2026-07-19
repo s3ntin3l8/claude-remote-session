@@ -57,12 +57,9 @@ interface CommandPaletteProps {
   // project's dev server.
   onOpenBrowser: (projectId: number) => void;
   // Issue #28's "general-purpose browser tile" — project-independent
-  // (unlike the two above), so always shown regardless of scope. Opens
-  // OpenUrlModal (App.tsx owns that too).
-  onOpenUrlModal: () => void;
-  // Same tile, but skips OpenUrlModal entirely: opens an empty browser pane
-  // (BrowserPanel's own "empty" state, address bar auto-focused) straight
-  // from +/⌘K for typing a URL inline rather than into a modal first.
+  // (unlike the two above), so always shown regardless of scope. Opens an
+  // empty browser pane (BrowserPanel's own "empty" state, address bar
+  // auto-focused) for typing a URL straight in, no modal detour.
   onOpenBlankBrowser: () => void;
 }
 
@@ -78,7 +75,6 @@ export function CommandPalette({
   onOpenGitHub,
   onOpenBrowser,
   onOpenIntegrationsSettings,
-  onOpenUrlModal,
   onOpenBlankBrowser,
 }: CommandPaletteProps) {
   const { projects, sessions, createSession, theme, settings } = useDashboardStore();
@@ -321,24 +317,6 @@ export function CommandPalette({
                 <button
                   className="cmd-row"
                   onClick={() => {
-                    onOpenUrlModal();
-                    onClose();
-                  }}
-                >
-                  <span
-                    className="cmd-row-icon"
-                    style={{ background: "color-mix(in srgb, var(--fg) 8%, transparent)" }}
-                  >
-                    <GlobeIcon size={13} style={{ color: "var(--muted)" }} />
-                  </span>
-                  <span className="cmd-row-body">
-                    <span className="cmd-row-title">Open URL…</span>
-                    <span className="cmd-row-subtitle">Embed any external site in a pane</span>
-                  </span>
-                </button>
-                <button
-                  className="cmd-row"
-                  onClick={() => {
                     onOpenBlankBrowser();
                     onClose();
                   }}
@@ -352,7 +330,7 @@ export function CommandPalette({
                   <span className="cmd-row-body">
                     <span className="cmd-row-title">New browser tab</span>
                     <span className="cmd-row-subtitle">
-                      Open an empty pane and type an address directly
+                      Embed any external site — type an address directly
                     </span>
                   </span>
                 </button>
