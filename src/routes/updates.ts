@@ -61,27 +61,53 @@ const applyUpdateSchema = {
 };
 
 export async function updatesRoute(app: FastifyInstance) {
-  app.get("/api/updates/check", async (_request, reply) => {
-    const repo = app.config.TESSERA_UPDATE_REPO;
-    const applyAvailable = app.config.TESSERA_HOME.trim() !== "";
-    try {
-      return await checkForUpdate(repo, appVersion, applyAvailable);
-    } catch (err) {
-      if (!(err instanceof UpdateCheckError)) throw err;
-      app.log.warn({ repo, statusCode: err.statusCode }, "update check unavailable");
-      return reply.badGateway(`could not check for updates: ${err.message}`);
-    }
-  });
+  // Rate-limited like GET /api/projects/discover and the GitHub integration
+  // routes (src/routes/projects.ts, src/routes/integrations.ts) — this also
+  // reaches out to api.github.com (CodeQL: js/missing-rate-limiting).
+  app.get(
+    "/api/updates/check",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (_request, reply) => {
+      const repo = app.config.TESSERA_UPDATE_REPO;
+      const applyAvailable = app.config.TESSERA_HOME.trim() !== "";
+      try {
+        return await checkForUpdate(repo, appVersion, applyAvailable);
+      } catch (err) {
+        if (!(err instanceof UpdateCheckError)) throw err;
+        app.log.warn({ repo, statusCode: err.statusCode }, "update check unavailable");
+        return reply.badGateway(`could not check for updates: ${err.message}`);
+      }
+    },
+  );
 
-  app.get("/api/updates/status", async () => {
-    const tesseraHome = app.config.TESSERA_HOME;
-    if (tesseraHome.trim() === "") return { phase: "unavailable" };
-    return readStatus(tesseraHome);
-  });
+  // Bounded well above the frontend's own poll cadence (UPDATE_STATUS_POLL_MS
+  // = 2000ms in Settings.tsx, i.e. ~30 req/min from one open tab) so normal
+  // polling — including from a couple of tabs open at once — never trips
+  // this, while still bounding the file read CodeQL flagged
+  // (js/missing-rate-limiting) against being hammered directly.
+  app.get(
+    "/api/updates/status",
+    { config: { rateLimit: { max: 90, timeWindow: "1 minute" } } },
+    async () => {
+      const tesseraHome = app.config.TESSERA_HOME;
+      if (tesseraHome.trim() === "") return { phase: "unavailable" };
+      return readStatus(tesseraHome);
+    },
+  );
 
   app.post<{ Body: ApplyUpdateBody }>(
     "/api/updates/apply",
-    { schema: applyUpdateSchema },
+    {
+      schema: applyUpdateSchema,
+      // Tighter than any other route in this repo — each call can spawn a
+      // systemd-run child that downloads a release and runs `npm ci` (CodeQL:
+      // js/missing-rate-limiting flagged both the file read and the process
+      // spawn below). The in-flight-phase check above and self-update.sh's
+      // own filesystem lock already prevent concurrent applies from doing
+      // real damage; this just bounds how many spawn attempts a client can
+      // fire in a burst.
+      config: { rateLimit: { max: 5, timeWindow: "1 minute" } },
+    },
     async (request, reply) => {
       const tesseraHome = app.config.TESSERA_HOME;
       if (tesseraHome.trim() === "") {
