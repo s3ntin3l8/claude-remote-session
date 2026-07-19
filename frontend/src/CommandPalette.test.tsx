@@ -51,6 +51,7 @@ describe("CommandPalette -> Integrations section", () => {
         onOpenGitHub={onOpenGitHub}
         onOpenBrowser={vi.fn()}
         onOpenUrlModal={vi.fn()}
+        onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
     );
@@ -71,6 +72,7 @@ describe("CommandPalette -> Integrations section", () => {
         onOpenGitHub={vi.fn()}
         onOpenBrowser={onOpenBrowser}
         onOpenUrlModal={vi.fn()}
+        onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
     );
@@ -91,6 +93,7 @@ describe("CommandPalette -> Integrations section", () => {
         onOpenGitHub={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenUrlModal={onOpenUrlModal}
+        onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
     );
@@ -111,12 +114,34 @@ describe("CommandPalette -> Integrations section", () => {
         onOpenGitHub={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenUrlModal={onOpenUrlModal}
+        onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
     );
 
     await user.click(await screen.findByText("Open URL…"));
     expect(onOpenUrlModal).toHaveBeenCalled();
+  });
+
+  it("opens a blank browser tab, project-independent, without going through the URL modal", async () => {
+    const onOpenBlankBrowser = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <CommandPalette
+        scope="global"
+        projectId={null}
+        onClose={vi.fn()}
+        onLaunched={vi.fn()}
+        onOpenGitHub={vi.fn()}
+        onOpenBrowser={vi.fn()}
+        onOpenUrlModal={vi.fn()}
+        onOpenBlankBrowser={onOpenBlankBrowser}
+        onOpenIntegrationsSettings={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByText("New browser tab"));
+    expect(onOpenBlankBrowser).toHaveBeenCalled();
   });
 
   it("opens Settings -> Integrations", async () => {
@@ -131,6 +156,7 @@ describe("CommandPalette -> Integrations section", () => {
         onOpenGitHub={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenUrlModal={vi.fn()}
+        onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={onOpenIntegrationsSettings}
       />,
     );
@@ -150,6 +176,7 @@ describe("CommandPalette -> Integrations section", () => {
         onOpenGitHub={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenUrlModal={vi.fn()}
+        onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
       />,
     );

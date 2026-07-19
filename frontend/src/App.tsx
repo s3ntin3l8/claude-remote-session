@@ -497,28 +497,55 @@ export function App() {
   // into params so BrowserPanel's first mount reuses it rather than
   // creating a second, redundant preview row for the same URL.
   //
-  // Stable panel id is derived from the slug (unlike onOpenBrowser's
-  // projectId-derived id above) since an external URL has no other natural
-  // stable identity. Always opens a fresh pane rather than open-or-focus:
-  // unlike a project (at most one preview pane makes sense), the same URL
-  // opened twice is a reasonable thing to want (e.g. comparing two states
-  // of the same page).
+  // Skips the POST entirely when the subdomain proxy isn't configured
+  // (PREVIEW_BASE_HOST unset — that route isn't even registered, see
+  // routes/previews.ts's own opt-in gate; firing it anyway is exactly the
+  // "Route POST:/api/previews not found" bug this fixed) — BrowserPanel's
+  // own direct-embed branch builds the iframe src from `url` itself in that
+  // case, so there's nothing to pre-create or reject client-side.
+  //
+  // Stable panel id is derived from the slug when one exists (unlike
+  // onOpenBrowser's projectId-derived id above) since an external URL has
+  // no other natural stable identity; falls back to a random id when there
+  // is no slug (direct-embed mode). Always opens a fresh pane rather than
+  // open-or-focus: unlike a project (at most one preview pane makes sense),
+  // the same URL opened twice is a reasonable thing to want (e.g. comparing
+  // two states of the same page).
   const onOpenExternalUrl = useCallback(
     async (url: string) => {
       if (!dockviewApi) return;
-      const preview = await api.createExternalPreview(url);
-      const panelId = `browser-ext-${preview.slug}`;
+      const info = await api.getServerInfo();
+      const preview = info.previewsEnabled ? await api.createExternalPreview(url) : null;
+      const panelId = `browser-ext-${preview?.slug ?? crypto.randomUUID()}`;
       const panel = dockviewApi.addPanel({
         id: panelId,
         component: "browser",
         title: "Preview",
-        params: { kind: "external", url, slug: preview.slug },
+        params: preview ? { kind: "external", url, slug: preview.slug } : { kind: "external", url },
       });
       if (isMobile) dockviewApi.maximizeGroup(panel);
       setSidebarOpen(false);
     },
     [dockviewApi, isMobile],
   );
+
+  // The CommandPalette's "New browser tab" entry — a general-purpose
+  // browser pane with nothing typed into its address bar yet, reachable
+  // straight from +/⌘K without going through OpenUrlModal first. No preview
+  // to pre-create (there's no URL yet), so unlike onOpenExternalUrl this
+  // never touches the network. Always opens a fresh pane; id has no natural
+  // stable identity to derive from, same reasoning as the fallback above.
+  const onOpenBlankBrowser = useCallback(() => {
+    if (!dockviewApi) return;
+    const panel = dockviewApi.addPanel({
+      id: `browser-ext-${crypto.randomUUID()}`,
+      component: "browser",
+      title: "Preview",
+      params: { kind: "external" },
+    });
+    if (isMobile) dockviewApi.maximizeGroup(panel);
+    setSidebarOpen(false);
+  }, [dockviewApi, isMobile]);
 
   const openGlobalLauncher = useCallback(() => {
     setPalette({ open: true, scope: "global", projectId: null });
@@ -723,6 +750,7 @@ export function App() {
           onOpenBrowser={onOpenBrowser}
           onOpenIntegrationsSettings={() => openSettings("integrations")}
           onOpenUrlModal={() => setOpenUrlModalOpen(true)}
+          onOpenBlankBrowser={onOpenBlankBrowser}
         />
       )}
       {settingsOpen && (

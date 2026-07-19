@@ -85,17 +85,20 @@ export function BrowserPanel({ params }: { params: BrowserPanelParams }) {
       .then((info) => {
         if (cancelled) return;
         if (!info.previewsEnabled || !info.previewBaseHost) {
-          // Belt-and-suspenders: the real guard is server-side
-          // (previewsEnabled is derived from PREVIEW_BASE_HOST being
-          // non-empty — see src/routes/server-info.ts — so these two
-          // conditions should never actually disagree). Checked together
-          // anyway so a future server-side change that decouples them
-          // can't silently build an invalid host like "preview-<slug>./"
-          // here.
-          setFetchState({
-            status: "unavailable",
-            message: "Browser preview isn't enabled on this server (PREVIEW_BASE_HOST is unset).",
-          });
+          // No subdomain proxy configured (PREVIEW_BASE_HOST unset) — rather
+          // than a dead "unavailable" state, embed the target directly: no
+          // POST /api/previews (that route isn't even registered — see
+          // routes/previews.ts's own opt-in gate), just the raw URL as the
+          // iframe src. security.ts's CSP frame-src allows any http(s)
+          // origin in this same unset-host case, so this only fails for
+          // sites that refuse embedding themselves (X-Frame-Options/
+          // frame-ancestors) — the one thing the subdomain proxy buys that
+          // this can't. Belt-and-suspenders checked together with
+          // previewsEnabled anyway (see src/routes/server-info.ts) so a
+          // future change that decouples them can't silently build an
+          // invalid proxied host like "preview-<slug>./" below.
+          const directUrl = isExternal ? currentUrl : devServerUrl;
+          setFetchState({ status: "ready", src: directUrl! });
           return;
         }
         // Reuse the pre-created slug (see the params field's own comment)
@@ -203,6 +206,12 @@ export function BrowserPanel({ params }: { params: BrowserPanelParams }) {
           value={addressInput}
           onChange={(e) => setAddressInput(e.target.value)}
           placeholder="https://example.com"
+          // Only the "New browser tab" case (empty on first mount) grabs
+          // focus — an already-loaded/loading/unavailable pane (restored
+          // from a saved workspace layout, or reopened via a stable
+          // slug-derived id) shouldn't steal focus out from under whatever
+          // else the user is doing.
+          autoFocus={state.status === "empty"}
           onKeyDown={(e) => {
             if (e.key === "Enter") navigate();
           }}
@@ -221,7 +230,10 @@ export function BrowserPanel({ params }: { params: BrowserPanelParams }) {
         )}
       </div>
       {state.status === "empty" && (
-        <div className="browser-panel-empty">Type a URL above and press Enter.</div>
+        <div className="browser-panel-empty">
+          Type a URL above and press Enter. Without a configured preview proxy (PREVIEW_BASE_HOST),
+          some sites refuse to be embedded (e.g. Google, GitHub) and won't load here.
+        </div>
       )}
       {state.status === "loading" && <div className="browser-panel-empty">Loading…</div>}
       {state.status === "unavailable" && <div className="browser-panel-empty">{state.message}</div>}
