@@ -161,9 +161,17 @@ export function Dock({
     };
   }, [heightDragging]);
 
+  const heightMountedRef = useRef(false);
   useEffect(() => {
-    // Persist on drag end only (not every intermediate frame) — reads the
-    // latest `height` intentionally, so this can't be keyed on it too.
+    // Skip the initial mount (heightDragging starts false) so a user who
+    // never touches the resize handle doesn't get the clamped/defaulted
+    // height silently written back to localStorage — persist on drag end
+    // only. Reads the latest `height` intentionally, so this can't be keyed
+    // on it too.
+    if (!heightMountedRef.current) {
+      heightMountedRef.current = true;
+      return;
+    }
     if (!heightDragging) localStorage.setItem(DOCK_HEIGHT_KEY, String(height));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- persist-on-drag-end, height read intentionally
   }, [heightDragging]);
