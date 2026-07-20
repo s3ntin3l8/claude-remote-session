@@ -28,8 +28,16 @@ const loginSchema = {
 // ceilings here, independent of RATE_LIMIT_MAX, same
 // `{ config: { rateLimit } }` per-route override mechanism internal.ts's own
 // INTERNAL_RATE_LIMIT uses.
-const LOGIN_RATE_LIMIT = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
-const ME_RATE_LIMIT = { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } };
+// Kept as bare rateLimit option objects, not pre-wrapped in `{ config: {...} }`
+// — CodeQL's js/missing-rate-limiting query couldn't trace `config.rateLimit`
+// through an object-spread (`...LOGIN_RATE_LIMIT`) at the route-registration
+// call site, only a literal `config: { rateLimit }` there directly (compare:
+// the `me` route below, registered the literal way, cleared the same alert;
+// `login` spread this same shape and stayed flagged even after being
+// genuinely rate-limited at runtime — a static-analysis limitation, not a
+// behavior difference, but literal is what satisfies it).
+const LOGIN_RATE_LIMIT = { max: 10, timeWindow: "1 minute" };
+const ME_RATE_LIMIT = { max: 30, timeWindow: "1 minute" };
 
 // All three routes live under /api/auth/ — src/plugins/auth.ts's onRequest
 // gate deliberately exempts that whole prefix (see its own comment), since
@@ -40,7 +48,7 @@ const ME_RATE_LIMIT = { config: { rateLimit: { max: 30, timeWindow: "1 minute" }
 export async function authRoute(app: FastifyInstance) {
   app.post<{ Body: { token: string } }>(
     "/api/auth/login",
-    { schema: loginSchema, ...LOGIN_RATE_LIMIT },
+    { schema: loginSchema, config: { rateLimit: LOGIN_RATE_LIMIT } },
     async (request, reply) => {
       if (!isValidLoginToken(request.body.token, app.config)) {
         return reply.unauthorized("invalid token");
@@ -73,7 +81,7 @@ export async function authRoute(app: FastifyInstance) {
     reply.code(204);
   });
 
-  app.get("/api/auth/me", ME_RATE_LIMIT, async (request) => {
+  app.get("/api/auth/me", { config: { rateLimit: ME_RATE_LIMIT } }, async (request) => {
     const enabled = isAuthEnabled(app.config);
     return {
       authMode: enabled ? "token" : "none",

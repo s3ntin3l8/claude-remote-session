@@ -208,20 +208,64 @@ describe("auth plugin + routes (issue #19)", () => {
         process.env.PREVIEW_BASE_HOST = "preview.test";
       });
 
-      it("does not gate a preview-host request, even against an /api/ path, with no credential", async () => {
+      it("does not gate a GET preview-host request, even against an /api/ path, with no credential", async () => {
         const app = await buildApp();
         // No preview is registered for this slug — previewProxyPlugin's own
         // onRequest hook resolves it and 404s "Unknown preview". A 401 here
         // would mean the auth gate (registered earlier) intercepted first;
         // a 404 instead proves it recognized the preview Host header and
         // got out of the way, letting previewProxyPlugin's hook run — even
-        // though the path (/api/whatever) would otherwise be gated.
+        // though the path (/api/whatever) would otherwise be gated. GET is
+        // the method previewProxyPlugin actually serves — see the sibling
+        // "does not extend the preview-host bypass to non-GET/HEAD" test
+        // below for why this can't extend to every method.
         const res = await app.inject({
           method: "GET",
           url: "/api/whatever",
           headers: { host: "preview-nonexistent.preview.test" },
         });
         expect(res.statusCode).toBe(404);
+        await app.close();
+      });
+
+      it("does not extend the preview-host bypass to non-GET/HEAD methods — the fix for a real auth-bypass found in review", async () => {
+        // previewProxyPlugin's own onRequest hook only ever serves GET/HEAD
+        // (preview-proxy.ts). request.headers.host is fully attacker-
+        // controlled, so a bypass keyed on Host alone (regardless of method)
+        // would let a forged `Host: preview-x.<PREVIEW_BASE_HOST>` on a
+        // state-changing request fall straight through to the real /api/*
+        // handler with no credential check at all — previewProxyPlugin
+        // never touches non-GET/HEAD requests either, so nothing else would
+        // catch it. Exercises the actual state-changing routes these
+        // methods gate, not just a bare /api/whatever placeholder, so a
+        // regression here would mean a real unauthenticated write, not a
+        // hypothetical one.
+        const app = await buildApp();
+        const previewHeaders = { host: "preview-nonexistent.preview.test" };
+
+        const post = await app.inject({
+          method: "POST",
+          url: "/api/projects",
+          headers: previewHeaders,
+          payload: { name: "p", cwd: "/tmp" },
+        });
+        expect(post.statusCode).toBe(401);
+
+        const patch = await app.inject({
+          method: "PATCH",
+          url: "/api/settings",
+          headers: previewHeaders,
+          payload: {},
+        });
+        expect(patch.statusCode).toBe(401);
+
+        const del = await app.inject({
+          method: "DELETE",
+          url: "/api/projects/1",
+          headers: previewHeaders,
+        });
+        expect(del.statusCode).toBe(401);
+
         await app.close();
       });
 

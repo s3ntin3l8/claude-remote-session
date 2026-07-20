@@ -51,6 +51,18 @@ function isProtectedPath(pathname: string): boolean {
  * unclosed one). A real fix — a short-lived, dashboard-minted preview-access
  * token appended to the iframe URL, validated by preview-proxy.ts itself —
  * is a follow-up, not this PR.
+ *
+ * That exemption is method-scoped, not just host-scoped — see
+ * isPreviewBypass below. `request.headers.host` is attacker-controlled (any
+ * client can send an arbitrary Host header), and previewProxyPlugin's own
+ * onRequest hook only ever serves GET/HEAD (preview-proxy.ts's `if
+ * (request.method !== "GET" && request.method !== "HEAD") return;`) — so a
+ * bypass keyed on Host alone, without also checking method, would let a
+ * spoofed `Host: preview-x.<PREVIEW_BASE_HOST>` on a POST/PATCH/DELETE fall
+ * straight through this hook and reach the real /api/* handler with no
+ * credential check at all, since previewProxyPlugin never touches non-GET/HEAD
+ * requests either. Caught in review on this PR before merge — see
+ * test/plugins/auth.test.ts's non-GET preview-host case.
  */
 export const authPlugin = fp(async (app: FastifyInstance) => {
   // Registered purely for reply.setCookie()/clearCookie() serialization
@@ -73,10 +85,19 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   const previewHostPattern =
     previewBaseHost !== "" ? buildPreviewHostPattern(previewBaseHost) : null;
 
+  // Mirrors previewProxyPlugin's own method gate exactly (preview-proxy.ts:
+  // "if (request.method !== 'GET' && request.method !== 'HEAD') return;") —
+  // that plugin is the only thing this bypass is meant to defer to, so the
+  // bypass must never be broader than what it actually serves. See this
+  // plugin's own doc comment above for why Host alone isn't enough.
+  function isPreviewBypass(request: { headers: { host?: string }; method: string }): boolean {
+    if (!previewHostPattern) return false;
+    if (request.method !== "GET" && request.method !== "HEAD") return false;
+    return isPreviewHost(request.headers.host, previewHostPattern);
+  }
+
   app.addHook("onRequest", async (request, reply) => {
-    if (previewHostPattern && isPreviewHost(request.headers.host, previewHostPattern)) {
-      return; // preview subdomain — see this plugin's own doc comment on why
-    }
+    if (isPreviewBypass(request)) return;
     if (!isProtectedPath(requestPathname(request.url))) return;
     if (isRequestAuthenticated(request.headers, app.config)) return;
     return reply.unauthorized("authentication required");
