@@ -173,6 +173,12 @@ export function TerminalPane(props: {
   // OSC color sequences on an actual dark/light toggle, not on every unrelated
   // pref update (font size, cursor blink, etc.).
   const prevThemeRef = useRef(theme);
+  // Queues OSC color bytes when theme toggles but the socket isn't OPEN
+  // (connecting/reconnecting/failed). The socket open handler below drains
+  // this so a toggle that happens during a reconnect is not lost — the
+  // running program always sees the current theme once the connection is
+  // restored.
+  const pendingOscRef = useRef<string | null>(null);
   // Mirrors `terminalSettings` for the reconnect/copy/paste logic inside the
   // mount effect's closures (connect(), onSelectionChange, contextmenu) —
   // those read `prefsRef.current` rather than a value captured once at
@@ -405,6 +411,14 @@ export function TerminalPane(props: {
         // current size actually is now that the socket is open, rather than
         // waiting for the next real resize to reach the backend PTY.
         sendResizeIfOpen();
+        // Drain any OSC color push that was queued while the socket was
+        // not OPEN (theme toggle during a reconnect).  The running program
+        // always sees the latest theme once the connection is restored.
+        const pending = pendingOscRef.current;
+        if (pending) {
+          socket.send(new TextEncoder().encode(pending));
+          pendingOscRef.current = null;
+        }
       });
 
       socket.addEventListener("message", (event) => {
@@ -454,6 +468,7 @@ export function TerminalPane(props: {
       webglAddonRef.current = null;
       fitAddonRef.current = null;
       wsRef.current = null;
+      pendingOscRef.current = null;
       refitRef.current = () => {};
     };
     // theme intentionally excluded — mount effect must not recreate the
@@ -487,20 +502,25 @@ export function TerminalPane(props: {
     // sequences through the PTY (arrives on the program's STDIN). Modern CLI
     // tools that implement terminal-aware theming (opencode) read these from
     // stdin and update their internal color scheme. Both #rrggbb and
-    // rgb:rr/gg/bb colour-spec formats are valid per OSC 10/11; the consumer
-    // (e.g. opencode's @opentui/core) accepts both (see renderer-theme-mode.ts
-    // line 7). Harmless for tools that don't handle them — the bytes are
+    // rgb:rr/gg/bb are valid colour-spec formats per OSC 10/11; we send hex
+    // (matching xterm's own colour storage) as the more commonly documented
+    // form. Harmless for tools that don't handle them — the bytes are
     // consumed silently in raw mode. Gated behind a theme comparison to avoid
     // re-sending identical bytes on unrelated pref changes (font size, cursor
-    // blink, etc.).
+    // blink, etc.). When the socket isn't OPEN (connecting/reconnecting/
+    // failed), the bytes are queued in pendingOscRef so the socket open
+    // handler above drains them when the connection is restored — otherwise a
+    // theme toggle during a reconnect would be silently lost.
     if (theme !== prevThemeRef.current) {
       const oscPush =
         `\x1b]10;${xtermTheme.foreground}\x07` + `\x1b]11;${xtermTheme.background}\x07`;
       const ws = wsRef.current;
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(new TextEncoder().encode(oscPush));
+        prevThemeRef.current = theme;
+      } else {
+        pendingOscRef.current = oscPush;
       }
-      prevThemeRef.current = theme;
     }
     attachKeyConflictHandler(
       term,
