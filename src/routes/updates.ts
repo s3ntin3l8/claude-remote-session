@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { spawn as spawnChild } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,6 +8,32 @@ import { checkForUpdate, UpdateCheckError } from "../services/update-checker.js"
 // In-flight phases self-update.sh writes to $TESSERA_HOME/.update-status.json
 // while an update is running — see scripts/self-update.sh's write_status().
 const IN_FLIGHT_PHASES = new Set(["downloading", "installing", "verifying", "restarting"]);
+
+// Per-IP sliding-window limiter for forced update checks (?force=true). Each
+// forced check hits GitHub's unauthenticated REST API (60 req/hr/IP), so this
+// is deliberately tighter than the route-level 30/min Fastify limit — 5 per
+// 10 minutes per IP keeps a manual "Check again" clicker well under GitHub's
+// cap even behind a shared egress IP. Scoped inside updatesRoute so each app
+// instance (including per-test buildApp calls) gets its own map.
+const FORCE_CHECK_WINDOW_MS = 10 * 60 * 1000;
+const FORCE_CHECK_MAX = 5;
+
+function makeForceCheckLimiter() {
+  const attempts = new Map<string, number[]>();
+  return (request: FastifyRequest): boolean => {
+    const ip = request.ip;
+    const now = Date.now();
+    const window = attempts.get(ip) ?? [];
+    const recent = window.filter((t) => now - t < FORCE_CHECK_WINDOW_MS);
+    if (recent.length >= FORCE_CHECK_MAX) {
+      attempts.set(ip, recent);
+      return false;
+    }
+    recent.push(now);
+    attempts.set(ip, recent);
+    return true;
+  };
+}
 
 // An in-flight status older than this is treated as abandoned, not a
 // genuinely running update — mirrors self-update.sh's own
@@ -80,6 +106,8 @@ const applyUpdateSchema = {
 };
 
 export async function updatesRoute(app: FastifyInstance) {
+  const checkForceLimit = makeForceCheckLimiter();
+
   // Rate-limited like GET /api/projects/discover and the GitHub integration
   // routes (src/routes/projects.ts, src/routes/integrations.ts) — this also
   // reaches out to api.github.com (CodeQL: js/missing-rate-limiting).
@@ -90,6 +118,9 @@ export async function updatesRoute(app: FastifyInstance) {
       const repo = app.config.TESSERA_UPDATE_REPO;
       const applyAvailable = app.config.TESSERA_HOME.trim() !== "";
       const force = request.query.force === "true";
+      if (force && !checkForceLimit(request)) {
+        return reply.tooManyRequests("too many forced update checks — try again later");
+      }
       try {
         return await checkForUpdate(repo, appVersion, applyAvailable, force);
       } catch (err) {
