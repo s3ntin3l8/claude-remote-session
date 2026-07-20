@@ -17,12 +17,15 @@ describe("env plugin", () => {
   });
 
   it("loads with default values (NODE_ENV may be set by test runner)", async () => {
-    // Clear the per-file DATABASE_URL injected by test/setup.ts to assert the
-    // schema default is applied. PORT doesn't need the same treatment:
-    // envPlugin skips dotenv entirely under NODE_ENV=test (see env.ts), so a
-    // developer's real local .env — e.g. a PORT override to dodge a conflict
-    // with another project's dev server, as on this box — never leaks in.
+    // Clear env vars that the dev shell may have set (PORT from local .env,
+    // DATABASE_URL from test/setup.ts) so schema defaults are asserted
+    // instead of inherited values — @fastify/env always merges process.env
+    // over schema defaults, so even without dotenv loading, an inherited
+    // PORT=3100 from a developer's shell leaks into app.config.
+    delete process.env.PORT;
     delete process.env.DATABASE_URL;
+    delete process.env.DB_ENCRYPTION_KEY;
+    delete process.env.PREVIEW_BASE_HOST;
     const app = await buildApp();
     expect(app.config.PORT).toBe(3000);
     expect(app.config.LOG_LEVEL).toBe("info");

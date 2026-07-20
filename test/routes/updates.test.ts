@@ -49,6 +49,10 @@ describe("updates route", () => {
   });
 
   beforeEach(() => {
+    // The dev shell may have TESSERA_HOME set; ensure tests start clean so
+    // "unset" assertions (applyAvailable: false, status: 'unavailable') are
+    // testing config defaults, not the developer's env.
+    delete process.env.TESSERA_HOME;
     tesseraHome = fs.mkdtempSync(path.join(os.tmpdir(), "updates-test-home-"));
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

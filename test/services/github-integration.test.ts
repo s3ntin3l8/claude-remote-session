@@ -142,6 +142,9 @@ describe("github-integration service", () => {
   });
 
   it("deviceFlowAvailable reflects whether GITHUB_OAUTH_CLIENT_ID is configured", async () => {
+    // The dev shell may have GITHUB_OAUTH_CLIENT_ID set; ensure the first
+    // assertion starts clean so it tests the default (unconfigured) state.
+    delete process.env.GITHUB_OAUTH_CLIENT_ID;
     const app = await buildApp();
     expect(getIntegration(app).deviceFlowAvailable).toBe(false);
     await app.close();
