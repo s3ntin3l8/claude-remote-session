@@ -96,6 +96,19 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
     return isPreviewHost(request.headers.host, previewHostPattern);
   }
 
+  // CodeQL (js/missing-rate-limiting) flags this hook: it performs an
+  // authorization check with no rate-limit decorator of its own. Reviewed —
+  // not applicable here, and not fixable the way routes/auth.ts's login/me
+  // routes were (a literal per-route `config: { rateLimit }`, which CodeQL
+  // does recognize): this hook runs for *every* protected request, not one
+  // specific "check a shared secret" endpoint, and it's already behind the
+  // app-wide limiter securityPlugin registers earlier in src/app.ts (that
+  // plugin's own onRequest hook counts and gates every request, including
+  // the ones that reach this one, before this hook ever runs). Adding a
+  // second, stricter limiter *here* wouldn't add brute-force protection —
+  // the actual credential check is POST /api/auth/login, already rate-
+  // limited directly — it would just throttle every authenticated user's
+  // normal API traffic a second time.
   app.addHook("onRequest", async (request, reply) => {
     if (isPreviewBypass(request)) return;
     if (!isProtectedPath(requestPathname(request.url))) return;
