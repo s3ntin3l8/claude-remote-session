@@ -41,6 +41,25 @@ type BrowserPanelState =
   | { status: "unavailable"; message: string }
   | { status: "ready"; src: string };
 
+// Blocks only URLs that parse as absolute with a script-executing scheme
+// (javascript:, data:, vbscript:, ...) — an iframe's src runs those in this
+// page's own origin, not the embedded target's (CodeQL: DOM text
+// reinterpreted as HTML/js/xss-through-dom). A bare port number or relative
+// path (the "no proxy configured, devServerUrl is just '5173'" case below —
+// see BrowserPanel.test.tsx) isn't a parseable absolute URL at all, so it
+// falls through unblocked exactly like before this check existed.
+// `currentUrl` can come from a restored workspace layout — an opaque blob
+// the backend never parses (see CLAUDE.md) — as well as direct address-bar
+// input, so "a user typed it" doesn't make it trustworthy.
+function isDangerousIframeSrc(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol !== "http:" && protocol !== "https:";
+  } catch {
+    return false;
+  }
+}
+
 // A dockview panel showing a project's dev server, or an arbitrary
 // external URL, both proxied same-origin at
 // "preview-<slug>.<previewBaseHost>" (issue #28) — the iframe embeds
@@ -107,6 +126,13 @@ export function BrowserPanel({ params }: { params: BrowserPanelParams }) {
           // the time this line executes — TS just can't see that across
           // the isExternal ternary, same as the projectId! assertion below.
           const directUrl = isExternal ? currentUrl : devServerUrl;
+          if (isDangerousIframeSrc(directUrl!)) {
+            setFetchState({
+              status: "unavailable",
+              message: "This URL's scheme can't be previewed here.",
+            });
+            return;
+          }
           setFetchState({ status: "ready", src: directUrl! });
           return;
         }

@@ -54,7 +54,17 @@ function warn(message: string, err?: unknown): void {
   // format string itself, and strip newlines so it can't forge extra log
   // lines (CodeQL: externally-controlled format string / log injection).
   const safeMessage = message.replace(/[\r\n]+/g, " ");
-  console.warn("[project-config] %s", safeMessage, err ?? "");
+  // err can also embed that same caller-controlled path (e.g. a Node fs
+  // error's message includes the path verbatim, and Linux filenames can
+  // contain literal newlines) — console.warn would print an Error object's
+  // multi-line .stack/.message as-is, undoing the stripping above. Reduce
+  // to just its message and strip the same way, rather than logging the
+  // object directly.
+  const safeErr =
+    err === undefined
+      ? ""
+      : String(err instanceof Error ? err.message : err).replace(/[\r\n]+/g, " ");
+  console.warn("[project-config] %s", safeMessage, safeErr);
 }
 
 /** Expand a leading "~" to the current user's home dir, same convention for

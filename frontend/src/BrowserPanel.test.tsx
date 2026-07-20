@@ -240,6 +240,41 @@ describe("BrowserPanel", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
+    it("refuses to embed a javascript: URL, even from a restored workspace layout's params.url (CodeQL: js/xss-through-dom)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() =>
+          Promise.resolve(
+            jsonResponse(200, { ...SERVER_INFO_BASE, previewsEnabled: false, previewBaseHost: "" }),
+          ),
+        ),
+      );
+
+      render(
+        <BrowserPanel params={{ kind: "external", url: "javascript:alert(document.domain)" }} />,
+      );
+
+      expect(await screen.findByText(/scheme can't be previewed/i)).toBeInTheDocument();
+      expect(screen.queryByTitle("Preview")).not.toBeInTheDocument();
+    });
+
+    it("refuses to embed a data: URL the same way", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() =>
+          Promise.resolve(
+            jsonResponse(200, { ...SERVER_INFO_BASE, previewsEnabled: false, previewBaseHost: "" }),
+          ),
+        ),
+      );
+
+      render(
+        <BrowserPanel params={{ kind: "external", url: "data:text/html,<script>1</script>" }} />,
+      );
+
+      expect(await screen.findByText(/scheme can't be previewed/i)).toBeInTheDocument();
+    });
+
     it("reuses the pre-created slug from params instead of creating a second preview", async () => {
       let previewCalls = 0;
       vi.stubGlobal(
