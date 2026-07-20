@@ -6,18 +6,7 @@
 import type { CursorStyle, Theme } from "../api.js";
 import { TERMINAL_SCHEMES, getTerminalScheme } from "../terminalSchemes.js";
 
-// Only rewrites scheme names literally ending in " Dark" (Tessera Dark, One Dark).
-// Theme-neutral names like "Solarized", "Dracula", "Gruvbox", "Tokyo Night" are
-// intentionally unchanged — they carry no dark/light bias in their base name.
-const DARK_SUFFIX_RE = /^(.*)\s+Dark$/;
-
-function schemeLabel(name: string, theme: Theme): string {
-  if (theme === "light") {
-    const m = DARK_SUFFIX_RE.exec(name);
-    if (m) return `${m[1]} Light`;
-  }
-  return name;
-}
+import { schemeLabel } from "./schemeLabel.js";
 
 export function SwatchGrid({
   value,
