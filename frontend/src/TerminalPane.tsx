@@ -249,17 +249,30 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
         });
     });
 
+    // Strips a trailing newline from clipboard text before it reaches the
+    // PTY. Clipboard content copied from a terminal commonly ends in `\n`;
+    // sent as-is, that lands on the shell as Enter and the pasted command
+    // executes immediately instead of sitting at the prompt for review
+    // (see issue #66). Routing through term.paste() below (rather than a
+    // raw ws.send) additionally wraps the text in bracketed-paste escapes
+    // (`\x1b[200~`/`\x1b[201~`) whenever the foreground app has enabled
+    // bracketed paste mode (DECSET 2004 — bash/zsh/most TUIs) — the backend
+    // PTY is a raw passthrough (routes/terminal.ts, pty-manager.ts) with no
+    // filtering, so it needs no special support for this; xterm generates
+    // and the shell interprets the escapes entirely client/foreground-app
+    // side.
+    function pasteToTerminal(text: string): void {
+      const trimmed = text.replace(/[\r\n]+$/, "");
+      if (trimmed) term.paste(trimmed);
+    }
+
     // Ctrl+V paste handler — reads from the system clipboard and writes to
     // the PTY, regardless of the pasteOnRightClick setting. Registered via
     // attachKeyConflictHandler above so it works even when the browser wants
     // to intercept Ctrl+V itself.
     pasteHandlerRef.current = () => {
       readClipboard().then((text) => {
-        if (text && ws?.readyState === WebSocket.OPEN) {
-          // Multi-line paste sends newlines as-is; bracketed paste mode
-          // is not currently supported on the backend PTY.
-          ws.send(new TextEncoder().encode(text));
-        }
+        if (text) pasteToTerminal(text);
       });
     };
 
@@ -270,9 +283,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
       if (!prefsRef.current.pasteOnRightClick) return;
       event.preventDefault();
       readClipboard().then((text) => {
-        if (text && ws?.readyState === WebSocket.OPEN) {
-          ws.send(new TextEncoder().encode(text));
-        }
+        if (text) pasteToTerminal(text);
       });
     };
     container.addEventListener("contextmenu", onContextMenu);
