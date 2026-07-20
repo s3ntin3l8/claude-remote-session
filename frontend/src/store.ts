@@ -422,7 +422,14 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
     },
 
     saveWorkspaceLayout: async (id, layout) => {
-      await api.saveWorkspaceLayout(id, layout);
+      try {
+        const updated = await api.saveWorkspaceLayout(id, layout);
+        set((state) => ({
+          workspaces: state.workspaces.map((w) => (w.id === id ? updated : w)),
+        }));
+      } catch (err) {
+        console.error("[store] failed to save workspace layout:", err);
+      }
     },
 
     setActiveWorkspaceId: (id) => {
