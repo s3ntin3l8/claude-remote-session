@@ -1081,7 +1081,6 @@ body {
    relative to xterm.css) — see issue #94. */
 .xterm .xterm-viewport {
   scrollbar-width: none;
-  -ms-overflow-style: none;
 }
 .xterm .xterm-viewport::-webkit-scrollbar {
   display: none;
