@@ -113,7 +113,16 @@ function attachKeyConflictHandler(
 // IDockviewPanelProps) — this component never touches `api`/`containerApi`,
 // so it can be reused outside a dockview panel too (see Dock.tsx, which
 // renders a dock monitor's terminal without a real dockview panel at all).
-export function TerminalPane(props: { params: TerminalPaneParams }) {
+export function TerminalPane(props: {
+  params: TerminalPaneParams;
+  // Fires with the raw OSC 0/2 title string the instant xterm parses it from
+  // the stream (issue #69) — real-time, unlike session.lastTitle which only
+  // reaches the client on the ~4s session poll. Optional and dockview-agnostic
+  // like the rest of this component's props (see the header comment above):
+  // Dock.tsx, which renders a terminal with no real dockview panel, simply
+  // omits it.
+  onTitleChange?: (title: string) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
@@ -164,6 +173,13 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
   const prefsRef = useRef(terminalSettings);
   const pasteHandlerRef = useRef<() => void>(() => {});
   const copyHandlerRef = useRef<() => void>(() => {});
+  // Mirrors `props.onTitleChange` for the same reason as prefsRef above — the
+  // mount effect's term.onTitleChange subscription (below) is created once
+  // and must not go stale if the caller passes a new callback identity later.
+  const onTitleChangeRef = useRef(props.onTitleChange);
+  useEffect(() => {
+    onTitleChangeRef.current = props.onTitleChange;
+  });
 
   useEffect(() => {
     const container = containerRef.current;
@@ -235,6 +251,12 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
         ws.send(new TextEncoder().encode(data));
       }
     });
+
+    // Real-time tab title tracking (issue #69) — fires whenever the running
+    // program emits an OSC 0/2 title sequence (e.g. a shell running `claude`
+    // then `opencode` retitles itself), independent of the ~4s session poll
+    // that lastTitle rides on.
+    const titleSub = term.onTitleChange((title) => onTitleChangeRef.current?.(title));
 
     let lastCols = term.cols;
     let lastRows = term.rows;
@@ -416,6 +438,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
       container.removeEventListener("contextmenu", onContextMenu);
       selectionSub.dispose();
       dataSub.dispose();
+      titleSub.dispose();
       ws?.close();
       term.dispose();
       termRef.current = null;

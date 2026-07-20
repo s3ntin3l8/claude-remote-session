@@ -243,7 +243,10 @@ export async function sessionsRoute(app: FastifyInstance) {
 
       const updated = app.db
         .update(sessions)
-        .set({ name: request.body.name })
+        // nameLocked pins this title against live OSC title updates (issue
+        // #69) — only an explicit rename through this route sets it; a
+        // launch-time name pattern (CommandPalette) never does.
+        .set({ name: request.body.name, nameLocked: true })
         .where(eq(sessions.id, sessionId))
         .returning()
         .all();
