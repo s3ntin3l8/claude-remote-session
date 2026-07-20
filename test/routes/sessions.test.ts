@@ -266,6 +266,97 @@ describe("sessions route", () => {
     await app.close();
   });
 
+  describe("POST /api/sessions/:id/uploads (issue #68)", () => {
+    async function createProjectWithCwd(app: Awaited<ReturnType<typeof buildApp>>, cwd: string) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "upload-p", cwd },
+      });
+      return res.json().id as number;
+    }
+
+    it("writes the image under the session's cwd and returns its absolute path", async () => {
+      const app = await buildApp();
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "sessions-upload-"));
+      const projectId = await createProjectWithCwd(app, cwd);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+      const buffer = Buffer.from("fake png bytes");
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/uploads`,
+        headers: { "content-type": "image/png" },
+        payload: buffer,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const { path: uploadPath } = res.json();
+      expect(uploadPath.startsWith(path.join(cwd, ".tessera-uploads"))).toBe(true);
+      expect(fs.readFileSync(uploadPath)).toEqual(buffer);
+
+      fs.rmSync(cwd, { recursive: true, force: true });
+      await app.close();
+    });
+
+    it("404s for an unknown session id", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/sessions/999999/uploads",
+        headers: { "content-type": "image/png" },
+        payload: Buffer.from("x"),
+      });
+      expect(res.statusCode).toBe(404);
+      await app.close();
+    });
+
+    it("rejects an image type outside the allow-list (matched by the content-type parser but not extensionForMime)", async () => {
+      const app = await buildApp();
+      const projectId = await createProject(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/uploads`,
+        headers: { "content-type": "image/svg+xml" },
+        payload: Buffer.from("<svg/>"),
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it("415s a non-image content type (no matching content-type parser)", async () => {
+      const app = await buildApp();
+      const projectId = await createProject(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/uploads`,
+        headers: { "content-type": "application/pdf" },
+        payload: Buffer.from("x"),
+      });
+      expect(res.statusCode).toBe(415);
+      await app.close();
+    });
+  });
+
   describe("multi-host (issue #26)", () => {
     async function createRemoteProject(app: Awaited<ReturnType<typeof buildApp>>) {
       const host = await app.inject({
@@ -379,6 +470,27 @@ describe("sessions route", () => {
         url: `/api/sessions?projectId=${remoteProject.json().id}`,
       });
       expect(list.json()).toEqual([expect.objectContaining({ id: orphan.id, status: "killed" })]);
+
+      await app.close();
+    });
+
+    it("502s an image upload for a session whose remote host is unreachable (issue #68)", async () => {
+      const app = await buildApp();
+      const { sessions } = await import("../../src/db/schema.js");
+      const projectId = await createRemoteProject(app);
+      const [orphan] = app.db
+        .insert(sessions)
+        .values({ projectId, command: "bash" })
+        .returning()
+        .all();
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${orphan.id}/uploads`,
+        headers: { "content-type": "image/png" },
+        payload: Buffer.from("x"),
+      });
+      expect(res.statusCode).toBe(502);
 
       await app.close();
     });

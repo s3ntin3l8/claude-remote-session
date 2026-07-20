@@ -448,6 +448,80 @@ describe("internal routes (agent role, issue #26)", () => {
     await app.close();
   });
 
+  describe("POST /internal/uploads (issue #68)", () => {
+    it("writes an image under <cwd>/.tessera-uploads and returns its absolute path", async () => {
+      const app = await buildApp();
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "internal-upload-"));
+      const buffer = Buffer.from("fake png bytes");
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/internal/uploads?cwd=${encodeURIComponent(cwd)}&mime=image%2Fpng`,
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "image/png" },
+        payload: buffer,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const { path: uploadPath } = res.json();
+      expect(uploadPath.startsWith(path.join(cwd, ".tessera-uploads"))).toBe(true);
+      expect(fs.readFileSync(uploadPath)).toEqual(buffer);
+
+      fs.rmSync(cwd, { recursive: true, force: true });
+      await app.close();
+    });
+
+    it("expands a leading ~ in cwd against this host's own home dir", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: `/internal/uploads?cwd=%7E&mime=image%2Fpng`,
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "image/png" },
+        payload: Buffer.from("x"),
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().path.startsWith(path.join(os.homedir(), ".tessera-uploads"))).toBe(true);
+
+      fs.rmSync(path.join(os.homedir(), ".tessera-uploads"), { recursive: true, force: true });
+      await app.close();
+    });
+
+    it("rejects a mime type outside the allow-list", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: `/internal/uploads?cwd=%2Ftmp&mime=image%2Fsvg%2Bxml`,
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "image/svg+xml" },
+        payload: Buffer.from("<svg/>"),
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it("requires cwd and mime query params", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/internal/uploads",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it("rejects a request with no Authorization header", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: `/internal/uploads?cwd=%2Ftmp&mime=image%2Fpng`,
+        headers: { "content-type": "image/png" },
+        payload: Buffer.from("x"),
+      });
+      expect(res.statusCode).toBe(401);
+      await app.close();
+    });
+  });
+
   it("rejects a WS attach with no Authorization header before the upgrade completes", async () => {
     const { app, port } = await buildAndListen();
 

@@ -13,6 +13,11 @@ import { getCachedAgents } from "../services/agent-detect.js";
 import { resolveGlobalPresets } from "./actions.js";
 import { attachSocketToSession } from "./terminal.js";
 import type { SessionInfo } from "../services/pty-manager.js";
+import {
+  MAX_UPLOAD_BYTES,
+  extensionForMime,
+  saveSessionUpload,
+} from "../services/session-upload.js";
 import { buildUpstreamRequestHeaders, relayFetchResponse } from "../services/http-proxy.js";
 import { pipeWsFrames, toWsUrl } from "../services/ws-pipe.js";
 import { timingSafeTokenMatch } from "../services/crypto-utils.js";
@@ -349,6 +354,32 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       await app.pty.terminate(request.params.id);
       reply.code(204);
+    },
+  );
+
+  // The agent-side counterpart to POST /api/sessions/:id/uploads (issue
+  // #68): writes a pasted/attached image under a session's cwd on THIS
+  // host's filesystem — where the CLI reading it back by path actually
+  // runs, for a remote-hosted project. cwd/mime travel as query params (a
+  // raw-body POST has no room for a JSON envelope alongside the image
+  // bytes); the request body is the image itself. Scoped to this plugin's
+  // own encapsulated context, so it never affects how any other route file
+  // parses its own request bodies.
+  app.addContentTypeParser(/^image\//, { parseAs: "buffer" }, (_req, body, done) => {
+    done(null, body);
+  });
+
+  app.post<{ Querystring: { cwd?: string; mime?: string } }>(
+    "/internal/uploads",
+    { ...INTERNAL_RATE_LIMIT, bodyLimit: MAX_UPLOAD_BYTES },
+    async (request, reply) => {
+      const { cwd, mime } = request.query;
+      if (!cwd || !mime) return reply.badRequest("cwd and mime query params are required");
+      if (!extensionForMime(mime)) return reply.badRequest(`Unsupported image type: ${mime}`);
+      if (!Buffer.isBuffer(request.body)) return reply.badRequest("expected a raw image body");
+
+      const uploadPath = saveSessionUpload(expandHome(cwd), request.body, mime);
+      return { path: uploadPath };
     },
   );
 
