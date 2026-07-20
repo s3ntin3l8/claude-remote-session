@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor } from "@testing-library/react";
+import { act } from "react";
 import type { Theme } from "./store.js";
 import { useDashboardStore } from "./store.js";
 import { TerminalPane } from "./TerminalPane.js";
@@ -21,6 +22,26 @@ function oscRegex() {
   const ESC = String.fromCharCode(27);
   const BEL = String.fromCharCode(7);
   return new RegExp(`^${ESC}\\]10;#[\\da-f]{6}${BEL}${ESC}\\]11;#[\\da-f]{6}${BEL}$`, "i");
+}
+
+// Once the fake socket reports OPEN, the component's own "open" handler also
+// fires a resize JSON send (see TerminalPane.tsx's sendResizeIfOpen) — so the
+// OSC push is not reliably `mock.calls[0]`. Scan every send for the one that
+// decodes to the OSC 10/11 format instead of assuming call order.
+//
+// Uses ArrayBuffer.isView rather than `instanceof Uint8Array`: vitest's jsdom
+// environment runs the test file in a separate vm-context realm, but the
+// source's `new TextEncoder().encode(...)` (TextEncoder is native, tied to
+// Node's outer realm) produces a Uint8Array that fails a raw cross-realm
+// `instanceof` check against this file's own Uint8Array global even though it
+// really is one — `ArrayBuffer.isView` doesn't rely on prototype identity, so
+// it's realm-agnostic.
+function decodedOscSends(): string[] {
+  return fakeWsSend.mock.calls
+    .map((call) => call[0] as unknown)
+    .filter((arg): arg is ArrayBufferView => ArrayBuffer.isView(arg))
+    .map((bytes) => new TextDecoder().decode(bytes))
+    .filter((decoded) => oscRegex().test(decoded));
 }
 
 vi.mock("@xterm/xterm", () => {
@@ -91,9 +112,20 @@ function stubFakeWebSocket(openImmediately: boolean) {
   if (openImmediately) {
     fakeSocket.readyState = 1;
   }
-  vi.stubGlobal("WebSocket", function () {
-    return fakeSocket;
-  });
+  // The component gates every send on `ws.readyState === WebSocket.OPEN`, so
+  // the stub constructor needs the standard readyState statics too — without
+  // these, WebSocket.OPEN is undefined and that comparison is always false,
+  // silently swallowing every send this test is trying to observe. Built via
+  // Object.assign (typed `object`) since `typeof WebSocket`'s statics are
+  // declared read-only — assigning to them directly only type-checks after
+  // the fact, via the final cast below.
+  const fakeWebSocketCtor: object = Object.assign(
+    function () {
+      return fakeSocket;
+    },
+    { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 },
+  );
+  vi.stubGlobal("WebSocket", fakeWebSocketCtor as unknown as typeof WebSocket);
 }
 
 beforeEach(() => {
@@ -165,43 +197,47 @@ describe("TerminalPane OSC push", () => {
     useDashboardStore.setState({ theme: "light" as Theme });
 
     await waitFor(() => {
-      expect(fakeWsSend).toHaveBeenCalled();
+      expect(decodedOscSends().length).toBeGreaterThan(0);
     });
-    const sent = fakeWsSend.mock.calls[0][0];
-    expect(sent).toBeInstanceOf(Uint8Array);
-    const decoded = new TextDecoder().decode(sent);
-    expect(decoded).toMatch(oscRegex());
   });
 
   it("does NOT send when socket is CLOSED, but sends on open", async () => {
     stubFakeWebSocket(false);
     renderPane();
 
-    useDashboardStore.setState({ theme: "light" as Theme });
+    // act() here (rather than a bare setState) forces the settings-sync
+    // effect to flush before the next line — without it, the effect that
+    // queues the OSC bytes into pendingOscRef hasn't necessarily run yet by
+    // the time the socket's "open" handler is fired manually below, so the
+    // drain would find nothing queued and silently no-op.
+    act(() => {
+      useDashboardStore.setState({ theme: "light" as Theme });
+    });
 
     expect(fakeWsSend).not.toHaveBeenCalled();
 
-    fakeSocket.readyState = 1;
-    for (const handler of fakeSocket._openHandlers) handler();
-
-    await waitFor(() => {
-      expect(fakeWsSend).toHaveBeenCalled();
+    act(() => {
+      fakeSocket.readyState = 1;
+      for (const handler of fakeSocket._openHandlers) handler();
     });
-    const sent1 = fakeWsSend.mock.calls[0][0];
-    expect(sent1).toBeInstanceOf(Uint8Array);
-    expect(new TextDecoder().decode(sent1)).toMatch(oscRegex());
+
+    // The open handler also fires a resize send (component's own
+    // sendResizeIfOpen), so the OSC push isn't necessarily the first call —
+    // scan every send for the one matching the OSC 10/11 format.
+    await waitFor(() => {
+      expect(decodedOscSends().length).toBeGreaterThan(0);
+    });
 
     // Toggle back to dark — prevThemeRef was advanced when the queued bytes
     // were stored, so this correctly detects a new change and sends again.
     fakeWsSend.mockClear();
-    useDashboardStore.setState({ theme: "dark" as Theme });
+    act(() => {
+      useDashboardStore.setState({ theme: "dark" as Theme });
+    });
 
     await waitFor(() => {
-      expect(fakeWsSend).toHaveBeenCalled();
+      expect(decodedOscSends().length).toBeGreaterThan(0);
     });
-    const sent2 = fakeWsSend.mock.calls[0][0];
-    expect(sent2).toBeInstanceOf(Uint8Array);
-    expect(new TextDecoder().decode(sent2)).toMatch(oscRegex());
   });
 
   it("does not send on unrelated pref changes (cursor blink)", async () => {
