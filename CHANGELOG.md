@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.6](https://github.com/s3ntin3l8/tessera-session-manager/compare/v0.1.5...v0.1.6) (2026-07-20)
+
+
+### Features
+
+* native OIDC login ([#30](https://github.com/s3ntin3l8/tessera-session-manager/issues/30)) sharing Phase 1's session cookie ([#59](https://github.com/s3ntin3l8/tessera-session-manager/issues/59)) ([9595c4c](https://github.com/s3ntin3l8/tessera-session-manager/commit/9595c4cc8490ebaf71a2b6d3d75aa57f489be87e))
+* optional in-process auth — shared-token gate + session cookie ([#19](https://github.com/s3ntin3l8/tessera-session-manager/issues/19)) ([#57](https://github.com/s3ntin3l8/tessera-session-manager/issues/57)) ([df376b8](https://github.com/s3ntin3l8/tessera-session-manager/commit/df376b899814f1203063d3dc6fdbf2f2a0339fc2))
+
+
+### Bug Fixes
+
+* sync terminal color scheme with app theme on toggle ([c108502](https://github.com/s3ntin3l8/tessera-session-manager/commit/c1085026c103d37321e59700827438c7259c5425))
+
 ## [0.1.5](https://github.com/s3ntin3l8/tessera-session-manager/compare/v0.1.4...v0.1.5) (2026-07-19)
 
 
