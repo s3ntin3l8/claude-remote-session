@@ -83,14 +83,15 @@ export async function updatesRoute(app: FastifyInstance) {
   // Rate-limited like GET /api/projects/discover and the GitHub integration
   // routes (src/routes/projects.ts, src/routes/integrations.ts) — this also
   // reaches out to api.github.com (CodeQL: js/missing-rate-limiting).
-  app.get(
+  app.get<{ Querystring: { force?: string } }>(
     "/api/updates/check",
     { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
-    async (_request, reply) => {
+    async (request, reply) => {
       const repo = app.config.TESSERA_UPDATE_REPO;
       const applyAvailable = app.config.TESSERA_HOME.trim() !== "";
+      const force = request.query.force === "true";
       try {
-        return await checkForUpdate(repo, appVersion, applyAvailable);
+        return await checkForUpdate(repo, appVersion, applyAvailable, force);
       } catch (err) {
         if (!(err instanceof UpdateCheckError)) throw err;
         app.log.warn({ repo, statusCode: err.statusCode }, "update check unavailable");
