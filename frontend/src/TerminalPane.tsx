@@ -165,6 +165,20 @@ export function TerminalPane(props: {
   const termRef = useRef<Terminal | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  // Mirrors `ws` for the settings-sync effect below so the OSC color push on
+  // theme toggle can reach the PTY without the mount effect's closure going
+  // stale across reconnects.
+  const wsRef = useRef<WebSocket | null>(null);
+  // Tracks the previous theme value so the settings-sync effect only pushes
+  // OSC color sequences on an actual dark/light toggle, not on every unrelated
+  // pref update (font size, cursor blink, etc.).
+  const prevThemeRef = useRef(theme);
+  // Queues OSC color bytes when theme toggles but the socket isn't OPEN
+  // (connecting/reconnecting/failed). The socket open handler below drains
+  // this so a toggle that happens during a reconnect is not lost — the
+  // running program always sees the current theme once the connection is
+  // restored.
+  const pendingOscRef = useRef<string | null>(null);
   // Mirrors `terminalSettings` for the reconnect/copy/paste logic inside the
   // mount effect's closures (connect(), onSelectionChange, contextmenu) —
   // those read `prefsRef.current` rather than a value captured once at
@@ -386,6 +400,7 @@ export function TerminalPane(props: {
       const socket = new WebSocket(wsUrl);
       socket.binaryType = "arraybuffer";
       ws = socket;
+      wsRef.current = socket;
 
       socket.addEventListener("open", () => {
         reconnectAttempt = 0;
@@ -396,6 +411,14 @@ export function TerminalPane(props: {
         // current size actually is now that the socket is open, rather than
         // waiting for the next real resize to reach the backend PTY.
         sendResizeIfOpen();
+        // Drain any OSC color push that was queued while the socket was
+        // not OPEN (theme toggle during a reconnect).  The running program
+        // always sees the latest theme once the connection is restored.
+        const pending = pendingOscRef.current;
+        if (pending) {
+          socket.send(new TextEncoder().encode(pending));
+          pendingOscRef.current = null;
+        }
       });
 
       socket.addEventListener("message", (event) => {
@@ -444,6 +467,8 @@ export function TerminalPane(props: {
       termRef.current = null;
       webglAddonRef.current = null;
       fitAddonRef.current = null;
+      wsRef.current = null;
+      pendingOscRef.current = null;
       refitRef.current = () => {};
     };
     // theme intentionally excluded — mount effect must not recreate the
@@ -471,7 +496,32 @@ export function TerminalPane(props: {
     term.options.scrollback = terminalSettings.scrollback;
     term.options.fontSize = terminalSettings.fontSize;
     term.options.fontFamily = `'${terminalSettings.fontFamily}', 'Geist Mono', monospace`;
-    term.options.theme = buildXtermTheme(terminalSettings.colorScheme, theme);
+    const xtermTheme = buildXtermTheme(terminalSettings.colorScheme, theme);
+    term.options.theme = xtermTheme;
+    // Notify the running program of a theme change by pushing OSC color SET
+    // sequences through the PTY (arrives on the program's STDIN). Modern CLI
+    // tools that implement terminal-aware theming (opencode) read these from
+    // stdin and update their internal color scheme. Both #rrggbb and
+    // rgb:rr/gg/bb are valid colour-spec formats per OSC 10/11; we send hex
+    // (matching xterm's own colour storage) as the more commonly documented
+    // form. Harmless for tools that don't handle them — the bytes are
+    // consumed silently in raw mode. Gated behind a theme comparison to avoid
+    // re-sending identical bytes on unrelated pref changes (font size, cursor
+    // blink, etc.). When the socket isn't OPEN (connecting/reconnecting/
+    // failed), the bytes are queued in pendingOscRef so the socket open
+    // handler above drains them when the connection is restored — otherwise a
+    // theme toggle during a reconnect would be silently lost.
+    if (theme !== prevThemeRef.current) {
+      const oscPush =
+        `\x1b]10;${xtermTheme.foreground}\x07` + `\x1b]11;${xtermTheme.background}\x07`;
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(new TextEncoder().encode(oscPush));
+      } else {
+        pendingOscRef.current = oscPush;
+      }
+      prevThemeRef.current = theme;
+    }
     attachKeyConflictHandler(
       term,
       reservedKeysFromSettings(terminalSettings.keyCapture),
