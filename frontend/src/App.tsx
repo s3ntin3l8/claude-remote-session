@@ -24,6 +24,33 @@ import type { Session } from "./api.js";
 import { playNotificationSound } from "./notifySound.js";
 import { randomPanelId } from "./random-id.js";
 
+// "opencode · my-project" — the running-program title (OSC-detected or the
+// launch name/command) with project context appended. Title-first, unlike
+// NotificationBell's project-first subtitle format, which serves a different
+// (dropdown) layout and has its own "Unknown project" fallback — not the same
+// helper despite the shared "· " separator.
+function formatPaneTitle(title: string, projectName: string | undefined): string {
+  return projectName ? `${title} · ${projectName}` : title;
+}
+
+// Title a terminal panel gets at `addPanel` time (issue #69). Order of
+// precedence:
+//  1. An explicit rename (nameLocked) always wins — that's the whole point
+//     of pinning.
+//  2. Otherwise, seed from `session.lastTitle` (the backend's last-seen OSC
+//     title, refreshed on the ~4s session poll) if present — covers
+//     reopening a pane for a session that's already running a program:
+//     xterm's onTitleChange won't re-fire on its own since no new OSC
+//     sequence is emitted, so without this the tab would show the stale
+//     launch name/command until the program next retitles itself.
+//  3. Otherwise, the launch-pattern name (CommandPalette) or raw command,
+//     same as before this fix — live OSC updates take it from here.
+function initialPaneTitle(session: Session, projectName: string | undefined): string {
+  if (session.nameLocked && session.name) return session.name;
+  if (session.lastTitle) return formatPaneTitle(session.lastTitle, projectName);
+  return session.name || session.command;
+}
+
 // Wrapped per-panel (not once around the whole dockview area) so a crash in
 // one session's terminal can't take out sibling panes too. Owns its own
 // `resetKey`, bumped by the boundary's "Reload pane" — a class component's
@@ -31,9 +58,27 @@ import { randomPanelId } from "./random-id.js";
 // fix is remounting a fresh <TerminalPane> under a new key instead.
 function TerminalPanelWrapper(props: IDockviewPanelProps<TerminalPaneParams>) {
   const [resetKey, setResetKey] = useState(0);
+  const sessionId = props.params.sessionId;
+  // Real-time tab title tracking (issue #69): TerminalPane stays dockview-
+  // agnostic (see its own header comment) and just reports the raw OSC
+  // title string up; this wrapper is where props.api.setTitle actually lives.
+  // Reads sessions/projects fresh via getState() at call time (rather than
+  // useDashboardStore selectors + a dep-array effect) so the always-current
+  // nameLocked flag gates every OSC event without re-subscribing TerminalPane
+  // on every store change.
+  const onTitleChange = useCallback(
+    (oscTitle: string) => {
+      const { sessions, projects } = useDashboardStore.getState();
+      const session = sessions.find((s) => s.id === sessionId);
+      if (!session || session.nameLocked) return; // pinned by an explicit rename
+      const projectName = projects.find((p) => p.id === session.projectId)?.name;
+      props.api.setTitle(formatPaneTitle(oscTitle, projectName));
+    },
+    [props.api, sessionId],
+  );
   return (
     <ErrorBoundary onReset={() => setResetKey((k) => k + 1)}>
-      <TerminalPane key={resetKey} params={props.params} />
+      <TerminalPane key={resetKey} params={props.params} onTitleChange={onTitleChange} />
     </ErrorBoundary>
   );
 }
@@ -401,18 +446,19 @@ export function App() {
         existing.api.setActive();
         if (isMobile) dockviewApi.maximizeGroup(existing);
       } else {
+        const projectName = projects.find((p) => p.id === session.projectId)?.name;
         const panel = dockviewApi.addPanel({
           id: panelId,
           component: "terminal",
           tabComponent: "terminal",
-          title: session.name || session.command,
+          title: initialPaneTitle(session, projectName),
           params: { sessionId: session.id },
         });
         if (isMobile) dockviewApi.maximizeGroup(panel);
       }
       setSidebarOpen(false);
     },
-    [dockviewApi, isMobile],
+    [dockviewApi, isMobile, projects],
   );
 
   // A session ended via the sidebar's explicit "end session" action (as
@@ -558,18 +604,19 @@ export function App() {
         existing.api.setActive();
       } else {
         const referencePanel = dockviewApi.getPanel(req.referencePanelId);
+        const projectName = projects.find((p) => p.id === session.projectId)?.name;
         dockviewApi.addPanel({
           id: panelId,
           component: "terminal",
           tabComponent: "terminal",
-          title: session.name || session.command,
+          title: initialPaneTitle(session, projectName),
           params: { sessionId: session.id },
           ...(referencePanel ? { position: { referencePanel, direction: req.direction } } : {}),
         });
       }
       setSidebarOpen(false);
     },
-    [dockviewApi, splitRequest, clearSplitRequest, onOpenSession],
+    [dockviewApi, splitRequest, clearSplitRequest, onOpenSession, projects],
   );
 
   // One toggle, two meanings depending on breakpoint: mobile's `sidebarOpen`

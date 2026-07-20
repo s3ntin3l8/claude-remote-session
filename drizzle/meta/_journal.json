@@ -78,6 +78,13 @@
       "when": 1784385919604,
       "tag": "0010_striped_lord_hawal",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1784552717312,
+      "tag": "0011_broken_roxanne_simpson",
+      "breakpoints": true
     }
   ]
 }

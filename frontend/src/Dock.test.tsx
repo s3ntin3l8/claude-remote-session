@@ -289,6 +289,7 @@ describe("Dock", () => {
         id: 99,
         projectId: 1,
         name: null,
+        nameLocked: false,
         command: "npm run dev",
         cwd: null,
         kind: "dock",
