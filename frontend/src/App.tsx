@@ -382,14 +382,18 @@ export function App() {
       const projectName = projects.find((p) => p.id === session.projectId)?.name;
       const target = lastDropTargetRef.current;
 
+      const panelBase = {
+        id: panelId,
+        component: "terminal" as const,
+        tabComponent: "terminal" as const,
+        title: initialPaneTitle(session, projectName),
+        params: { sessionId: session.id },
+      };
+
       if (target && target.group) {
         if (target.location === "edge") {
           dockviewApi.addPanel({
-            id: panelId,
-            component: "terminal",
-            tabComponent: "terminal",
-            title: initialPaneTitle(session, projectName),
-            params: { sessionId: session.id },
+            ...panelBase,
             position: {
               referenceGroup: target.group,
               direction: positionToDirection(target.position),
@@ -397,23 +401,12 @@ export function App() {
           });
         } else {
           dockviewApi.addPanel({
-            id: panelId,
-            component: "terminal",
-            tabComponent: "terminal",
-            title: initialPaneTitle(session, projectName),
-            params: { sessionId: session.id },
+            ...panelBase,
             position: { referenceGroup: target.group, direction: "within" },
           });
         }
       } else {
-        dockviewApi.addPanel({
-          id: panelId,
-          component: "terminal",
-          tabComponent: "terminal",
-          title: initialPaneTitle(session, projectName),
-          params: { sessionId: session.id },
-          floating: true,
-        });
+        dockviewApi.addPanel({ ...panelBase, floating: true });
       }
       lastDropTargetRef.current = null;
       setSidebarOpen(false);
@@ -541,7 +534,7 @@ export function App() {
         tabComponent: "terminal",
         title: initialPaneTitle(session, projectName),
         params: { sessionId: session.id },
-        floating: true,
+        ...(!isMobile && { floating: true }),
       });
       if (isMobile) dockviewApi.maximizeGroup(panel);
       setSidebarOpen(false);
