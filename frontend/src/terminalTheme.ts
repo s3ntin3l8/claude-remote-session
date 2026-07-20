@@ -5,22 +5,18 @@ import { getTerminalScheme } from "./terminalSchemes.js";
 // for the DOM renderer, a texture atlas for the WebGL renderer) — every
 // color has to be a literal, not a CSS custom property.
 //
-// Previously this derived colors from the app's dark/light CSS variables
-// (getComputedStyle on `--term`/`--fg`/etc.). The Settings rework makes
-// terminal color entirely scheme-driven instead (Appearance -> Color
-// scheme's 6 swatches) and deliberately decoupled from the app chrome's own
-// dark/light theme — see the plan's "color schemes recolor the terminal
-// only" decision. So this now takes just a scheme id and needs no DOM
-// access at all.
+// Each scheme carries both dark and light bg/fg values (see terminalSchemes.ts).
+// When `theme` is "light" the scheme's bgLight/fgLight are used for background,
+// foreground, cursor, and cursorAccent; the ANSI color palette stays the same
+// across themes except for black and white (colors 0 and 7), which swap so
+// that ANSI white text remains readable on a light background. brightBlack/
+// brightWhite (colors 8/15) are always medium-gray and pure-white respectively
+// — readable on both backgrounds as-is.
 //
-// All 6 schemes are dark-background palettes (this is a terminal palette
-// picker, not a light-mode terminal), so black/white/bright-black/
-// bright-white are shared literals rather than derived per scheme — mirrors
-// the values the old dark-theme branch used. Bright ANSI colors are a
-// simple programmatic lighten of each scheme's base color: none of the
-// reference's 6 palettes specify bright variants (its preview only uses 8
-// colors), so this is the closest reasonable approximation rather than a
-// byte-exact port.
+// Bright ANSI colors are a simple programmatic lighten of each scheme's base
+// color: none of the reference's 6 palettes specify bright variants (its
+// preview only uses 8 colors), so this is the closest reasonable approximation
+// rather than a byte-exact port.
 function lighten(hex: string, amount: number): string {
   const n = parseInt(hex.slice(1), 16);
   const r = Math.min(255, Math.round(((n >> 16) & 0xff) + 255 * amount));
@@ -29,23 +25,29 @@ function lighten(hex: string, amount: number): string {
   return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export function buildXtermTheme(schemeId: string): ITheme {
+export function buildXtermTheme(schemeId: string, theme: "dark" | "light" = "dark"): ITheme {
   const scheme = getTerminalScheme(schemeId);
+  const bg = theme === "light" ? scheme.bgLight : scheme.bg;
+  const fg = theme === "light" ? scheme.fgLight : scheme.fg;
+  const isLight = theme === "light";
 
   return {
-    background: scheme.bg,
-    foreground: scheme.fg,
-    cursor: scheme.fg,
-    cursorAccent: scheme.bg,
+    background: bg,
+    foreground: fg,
+    cursor: fg,
+    cursorAccent: bg,
     selectionBackground: `${scheme.blue}4D`,
-    black: "#1c1c1e",
+    // In light mode ANSI black/white swap so white text (color 7) stays
+    // readable on a light background. brightBlack/brightWhite (8/15) are
+    // medium-gray and pure-white respectively — visible on both backgrounds.
+    black: isLight ? "#c7c7cc" : "#1c1c1e",
     red: scheme.red,
     green: scheme.green,
     yellow: scheme.yellow,
     blue: scheme.blue,
     magenta: scheme.magenta,
     cyan: scheme.cyan,
-    white: "#c7c7cc",
+    white: isLight ? "#1c1c1e" : "#c7c7cc",
     brightBlack: "#666670",
     brightRed: lighten(scheme.red, 0.2),
     brightGreen: lighten(scheme.green, 0.2),

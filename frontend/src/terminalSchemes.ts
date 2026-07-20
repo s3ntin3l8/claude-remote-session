@@ -9,6 +9,8 @@ export interface TerminalScheme {
   name: string;
   bg: string;
   fg: string;
+  bgLight: string;
+  fgLight: string;
   green: string;
   yellow: string;
   blue: string;
@@ -23,6 +25,8 @@ export const TERMINAL_SCHEMES: TerminalScheme[] = [
     name: "Tessera Dark",
     bg: "#0d0d0d",
     fg: "#ededed",
+    bgLight: "#f0f0f0",
+    fgLight: "#1c1c1e",
     green: "#5ec27a",
     yellow: "#d7b06a",
     blue: "#5c9bf5",
@@ -35,6 +39,8 @@ export const TERMINAL_SCHEMES: TerminalScheme[] = [
     name: "Tokyo Night",
     bg: "#1a1b26",
     fg: "#c0caf5",
+    bgLight: "#e8e6df",
+    fgLight: "#1e1e2e",
     green: "#9ece6a",
     yellow: "#e0af68",
     blue: "#7aa2f7",
@@ -47,6 +53,8 @@ export const TERMINAL_SCHEMES: TerminalScheme[] = [
     name: "Dracula",
     bg: "#282a36",
     fg: "#f8f8f2",
+    bgLight: "#f0edf2",
+    fgLight: "#1e1e2e",
     green: "#50fa7b",
     yellow: "#f1fa8c",
     blue: "#bd93f9",
@@ -59,6 +67,8 @@ export const TERMINAL_SCHEMES: TerminalScheme[] = [
     name: "Solarized",
     bg: "#002b36",
     fg: "#93a1a1",
+    bgLight: "#fdf6e3",
+    fgLight: "#657b83",
     green: "#859900",
     yellow: "#b58900",
     blue: "#268bd2",
@@ -71,6 +81,8 @@ export const TERMINAL_SCHEMES: TerminalScheme[] = [
     name: "Gruvbox",
     bg: "#282828",
     fg: "#ebdbb2",
+    bgLight: "#fbf1c7",
+    fgLight: "#3c3836",
     green: "#b8bb26",
     yellow: "#fabd2f",
     blue: "#83a598",
@@ -83,6 +95,8 @@ export const TERMINAL_SCHEMES: TerminalScheme[] = [
     name: "One Dark",
     bg: "#282c34",
     fg: "#abb2bf",
+    bgLight: "#eef0f2",
+    fgLight: "#2c323c",
     green: "#98c379",
     yellow: "#e5c07b",
     blue: "#61afef",
