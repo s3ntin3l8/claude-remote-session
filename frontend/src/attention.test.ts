@@ -9,6 +9,7 @@ function makeSession(overrides: Partial<Session>): Session {
     id: 1,
     projectId: 1,
     name: "test",
+    nameLocked: false,
     command: "bash",
     cwd: null,
     kind: "terminal",

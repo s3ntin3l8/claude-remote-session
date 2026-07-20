@@ -87,6 +87,7 @@ describe("sessions route", () => {
       command: "bash",
       status: "active",
       kind: "terminal",
+      nameLocked: false,
     });
     const sessionId = created.json().id;
 
@@ -193,7 +194,7 @@ describe("sessions route", () => {
     await app.close();
   });
 
-  it("renames a session", async () => {
+  it("renames a session and locks the name against live OSC title updates (issue #69)", async () => {
     const app = await buildApp();
     const projectId = await createProject(app);
     const created = await app.inject({
@@ -202,6 +203,7 @@ describe("sessions route", () => {
       payload: { projectId, command: "bash" },
     });
     const sessionId = created.json().id;
+    expect(created.json().nameLocked).toBe(false);
 
     const renamed = await app.inject({
       method: "PATCH",
@@ -210,6 +212,20 @@ describe("sessions route", () => {
     });
     expect(renamed.statusCode).toBe(200);
     expect(renamed.json().name).toBe("my shell");
+    expect(renamed.json().nameLocked).toBe(true);
+
+    await app.close();
+  });
+
+  it("leaves nameLocked false for a launch-time name (e.g. CommandPalette's name pattern), unlike an explicit rename (issue #69)", async () => {
+    const app = await buildApp();
+    const projectId = await createProject(app);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { projectId, command: "claude", name: "claude · my-project" },
+    });
+    expect(created.json()).toMatchObject({ name: "claude · my-project", nameLocked: false });
 
     await app.close();
   });

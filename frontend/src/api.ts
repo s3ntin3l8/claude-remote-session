@@ -75,6 +75,12 @@ export interface Session {
   id: number;
   projectId: number;
   name: string | null;
+  // True once the user has explicitly renamed this session (PATCH
+  // /api/sessions/:id) — false for a launch-time name pattern (see
+  // CommandPalette's expandSessionNamePattern). The tab-title-tracking effect
+  // (issue #69) pins the title against live OSC updates only when this is
+  // true, so an auto-launch name stays overridable while a real rename doesn't.
+  nameLocked: boolean;
   command: string;
   cwd: string | null;
   // "dock" sessions are spawned from a project's dock controls (persistent

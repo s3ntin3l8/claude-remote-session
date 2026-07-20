@@ -367,6 +367,14 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
     },
 
     renameSession: async (id, name) => {
+      // Set nameLocked optimistically (same pattern as reorderWorkspaces
+      // above) — closes the narrow window between PaneTab's immediate
+      // `props.api.setTitle(value)` and this PATCH+refresh resolving, during
+      // which a live OSC title event (issue #69) would otherwise still see
+      // nameLocked: false in the store and override the just-committed rename.
+      set((state) => ({
+        sessions: state.sessions.map((s) => (s.id === id ? { ...s, name, nameLocked: true } : s)),
+      }));
       await api.renameSession(id, name);
       await get().refreshSessions();
     },

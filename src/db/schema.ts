@@ -94,6 +94,12 @@ export const sessions = sqliteTable("sessions", {
     .references(() => projects.id, { onDelete: "cascade" }),
   // Cosmetic label the user can rename; falls back to `command` when unset.
   name: text("name"),
+  // True only once the user has explicitly renamed this session (PATCH
+  // /api/sessions/:id) — NOT set by launch-time name patterns (see
+  // CommandPalette's expandSessionNamePattern), which leave this false so a
+  // live OSC title update (issue #69) is still free to override them. Once
+  // true, the frontend pins the tab title against further OSC updates.
+  nameLocked: integer("name_locked", { mode: "boolean" }).notNull().default(false),
   // Shell command line to run, e.g. "claude", "codex", "bash" — see the
   // plan's CLI-agnostic design; PtyManager treats this as an opaque string.
   command: text("command").notNull(),
