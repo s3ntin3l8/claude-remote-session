@@ -77,6 +77,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
   // stable across unrelated settings changes: store.ts's deepMerge only
   // creates a new `terminal` object when a patch actually touches it.
   const terminalSettings = useDashboardStore((s) => s.settings.terminal);
+  const theme = useDashboardStore((s) => s.theme);
   // Populated by the mount effect once the terminal/WebGL/fit addons exist,
   // so the settings-sync effect below can update the *same* live instance
   // instead of only ever seeing the value captured at construction.
@@ -112,7 +113,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
       // tokens) — xterm's `theme` option is passed straight to the renderer
       // (canvas fillStyle / WebGL texture atlas), which doesn't resolve CSS
       // custom properties on its own.
-      theme: buildXtermTheme(prefs.colorScheme),
+      theme: buildXtermTheme(prefs.colorScheme, theme),
       // Unicode11Addon reads term.unicode, which xterm gates behind this
       // flag as a "proposed" (not yet stabilized) API.
       allowProposedApi: true,
@@ -288,6 +289,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
       webglAddonRef.current = null;
       fitAddonRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.params.sessionId]);
 
   // Applies every terminal pref to the *live* instance in place — this is
@@ -309,7 +311,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     term.options.scrollback = terminalSettings.scrollback;
     term.options.fontSize = terminalSettings.fontSize;
     term.options.fontFamily = `'${terminalSettings.fontFamily}', 'Geist Mono', monospace`;
-    term.options.theme = buildXtermTheme(terminalSettings.colorScheme);
+    term.options.theme = buildXtermTheme(terminalSettings.colorScheme, theme);
     attachKeyConflictHandler(term, reservedKeysFromSettings(terminalSettings.keyCapture));
 
     // The WebGL renderer caches glyphs (size and color both) in a texture
@@ -330,7 +332,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     } else {
       fitAddon?.fit();
     }
-  }, [terminalSettings]);
+  }, [terminalSettings, theme]);
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>

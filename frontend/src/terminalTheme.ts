@@ -29,14 +29,16 @@ function lighten(hex: string, amount: number): string {
   return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export function buildXtermTheme(schemeId: string): ITheme {
+export function buildXtermTheme(schemeId: string, theme: "dark" | "light" = "dark"): ITheme {
   const scheme = getTerminalScheme(schemeId);
+  const bg = theme === "light" ? scheme.bgLight : scheme.bg;
+  const fg = theme === "light" ? scheme.fgLight : scheme.fg;
 
   return {
-    background: scheme.bg,
-    foreground: scheme.fg,
-    cursor: scheme.fg,
-    cursorAccent: scheme.bg,
+    background: bg,
+    foreground: fg,
+    cursor: fg,
+    cursorAccent: bg,
     selectionBackground: `${scheme.blue}4D`,
     black: "#1c1c1e",
     red: scheme.red,
