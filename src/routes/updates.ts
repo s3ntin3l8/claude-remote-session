@@ -19,14 +19,22 @@ const FORCE_CHECK_WINDOW_MS = 10 * 60 * 1000;
 const FORCE_CHECK_MAX = 5;
 
 function makeForceCheckLimiter() {
+  // Per-IP sliding-window map. Pruned on each access: when an IP's
+  // recorded timestamps have all aged out of the window the entry is
+  // deleted, so the outer map is bounded by IPs active within the last
+  // FORCE_CHECK_WINDOW_MS, not by total distinct IPs over process lifetime.
   const attempts = new Map<string, number[]>();
   return (request: FastifyRequest): boolean => {
     const ip = request.ip;
     const now = Date.now();
-    const window = attempts.get(ip) ?? [];
-    const recent = window.filter((t) => now - t < FORCE_CHECK_WINDOW_MS);
+    const existing = attempts.get(ip);
+    // Filter to only timestamps still within the window.
+    const recent = existing ? existing.filter((t) => now - t < FORCE_CHECK_WINDOW_MS) : [];
+    if (recent.length === 0 && existing) {
+      attempts.delete(ip);
+    }
     if (recent.length >= FORCE_CHECK_MAX) {
-      attempts.set(ip, recent);
+      if (recent.length > 0) attempts.set(ip, recent);
       return false;
     }
     recent.push(now);
