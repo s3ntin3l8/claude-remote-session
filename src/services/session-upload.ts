@@ -24,41 +24,51 @@ const MIME_EXTENSIONS: Record<string, string> = {
   "image/webp": ".webp",
 };
 
-// One entry per MIME_EXTENSIONS key — each checks the buffer's own leading
-// bytes against that format's real file signature, independent of whatever
-// Content-Type the client claims.
-const MAGIC_BYTE_CHECKS: Record<string, (buf: Buffer) => boolean> = {
-  "image/png": (buf) =>
-    buf.length >= 8 &&
-    buf[0] === 0x89 &&
-    buf[1] === 0x50 &&
-    buf[2] === 0x4e &&
-    buf[3] === 0x47 &&
-    buf[4] === 0x0d &&
-    buf[5] === 0x0a &&
-    buf[6] === 0x1a &&
-    buf[7] === 0x0a,
-  "image/jpeg": (buf) => buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff,
-  "image/gif": (buf) =>
-    buf.length >= 6 &&
-    buf.subarray(0, 3).toString("latin1") === "GIF" &&
-    (buf.subarray(3, 6).toString("latin1") === "87a" ||
-      buf.subarray(3, 6).toString("latin1") === "89a"),
-  "image/webp": (buf) =>
-    buf.length >= 12 &&
-    buf.subarray(0, 4).toString("latin1") === "RIFF" &&
-    buf.subarray(8, 12).toString("latin1") === "WEBP",
-};
-
 /**
  * True only when `buffer` actually starts with `mime`'s real file signature
  * — the content check backing MIME_EXTENSIONS' doc comment above. `mime`
  * must already be one of MIME_EXTENSIONS' keys (callers check
  * extensionForMime first); an unrecognized mime here reads as a mismatch,
  * not a pass.
+ *
+ * A literal `switch` on purpose, not a `Record<string, (buf) => boolean>`
+ * keyed and invoked by `mime` — CodeQL flagged that shape as an
+ * "unvalidated dynamic method call" (dispatch on a user-controlled name),
+ * even though the only thing at stake was `?.()` on an unknown key. A
+ * `switch` over literal cases has no dynamic dispatch for CodeQL to flag.
  */
 export function matchesMagicBytes(buffer: Buffer, mime: string): boolean {
-  return MAGIC_BYTE_CHECKS[mime]?.(buffer) ?? false;
+  switch (mime) {
+    case "image/png":
+      return (
+        buffer.length >= 8 &&
+        buffer[0] === 0x89 &&
+        buffer[1] === 0x50 &&
+        buffer[2] === 0x4e &&
+        buffer[3] === 0x47 &&
+        buffer[4] === 0x0d &&
+        buffer[5] === 0x0a &&
+        buffer[6] === 0x1a &&
+        buffer[7] === 0x0a
+      );
+    case "image/jpeg":
+      return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    case "image/gif":
+      return (
+        buffer.length >= 6 &&
+        buffer.subarray(0, 3).toString("latin1") === "GIF" &&
+        (buffer.subarray(3, 6).toString("latin1") === "87a" ||
+          buffer.subarray(3, 6).toString("latin1") === "89a")
+      );
+    case "image/webp":
+      return (
+        buffer.length >= 12 &&
+        buffer.subarray(0, 4).toString("latin1") === "RIFF" &&
+        buffer.subarray(8, 12).toString("latin1") === "WEBP"
+      );
+    default:
+      return false;
+  }
 }
 
 // Generous enough for a screenshot or camera photo, small enough to keep a
@@ -80,21 +90,24 @@ export function extensionForMime(mime: string): string | null {
  * from caller input — so there's nothing for a traversal attempt to reach
  * outside the fixed upload subdirectory.
  *
- * `cwd` itself is trusted at the same level as PtyManager's own spawn/attach
- * cwd (routes/internal.ts's own `/internal/sessions` and `/internal/ws/attach`
- * — see that file's doc comments): for the primary's local route it's a
- * DB-persisted project/session cwd, and for the agent role it's a caller-
- * supplied path gated only by the shared TESSERA_AGENT_TOKEN, not scoped to
- * PROJECTS_ROOTS. This is deliberate, not an oversight — whoever holds that
- * token (or reaches the primary's own routes) can already spawn an arbitrary
- * program in this same cwd via those sibling endpoints, which subsumes
- * "write a file here"; restricting cwd only for uploads wouldn't remove any
- * real capability, just make this one endpoint inconsistent with its
- * siblings. What IS enforced regardless of cwd: a hard size cap
- * (MAX_UPLOAD_BYTES, plus the route's own bodyLimit), an image-only mime
- * allow-list verified against the file's actual bytes (not just a claimed
- * Content-Type), and a server-generated filename confined to the fixed
- * `.tessera-uploads/` subdirectory.
+ * `cwd` trust is caller-dependent, not this function's concern: the
+ * primary's local route (routes/sessions.ts) passes a DB-persisted
+ * project/session cwd, trusted at the same level as its own unrestricted
+ * project-cwd model. The agent route (`POST /internal/uploads`,
+ * routes/internal.ts) resolves and confines `cwd` to this host's own
+ * PROJECTS_ROOTS via `resolveWithinRoots` *before* calling this function —
+ * the same barrier `/internal/actions`, `/internal/dock`, and
+ * `/internal/github-repo` already apply to a caller-supplied cwd (see that
+ * function's doc comment). CodeQL flagged this route's original
+ * unrestricted cwd as uncontrolled data reaching a real filesystem write —
+ * unlike those read-only routes, and unlike `/internal/sessions`/
+ * `/internal/ws/attach`'s exec-only use of cwd, `saveSessionUpload` actually
+ * creates a directory and writes a file, so it needed the same containment
+ * those read routes already had. What this function itself enforces
+ * regardless of caller: a hard size cap (MAX_UPLOAD_BYTES, plus the route's
+ * own bodyLimit), an image-only mime allow-list verified against the file's
+ * actual bytes (not just a claimed Content-Type), and a server-generated
+ * filename confined to the fixed `.tessera-uploads/` subdirectory.
  */
 export function saveSessionUpload(cwd: string, buffer: Buffer, mime: string): string {
   const ext = extensionForMime(mime);

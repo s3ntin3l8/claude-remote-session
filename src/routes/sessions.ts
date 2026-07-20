@@ -287,9 +287,15 @@ export async function sessionsRoute(app: FastifyInstance) {
       const [project] = app.db.select().from(projects).where(eq(projects.id, row.projectId)).all();
       if (!project) return reply.notFound();
 
-      const mime = request.headers["content-type"];
+      // Hermes review (PR #106): a bare exact-key match against the raw
+      // header would 400 a real image whose Content-Type happens to carry a
+      // `; charset=...` (or other) parameter — browsers send bare blob
+      // types today, but stripping params costs nothing and removes the
+      // footgun.
+      const rawContentType = request.headers["content-type"];
+      const mime = rawContentType?.split(";")[0]?.trim();
       if (!mime || !extensionForMime(mime)) {
-        return reply.badRequest(`Unsupported image type: ${mime ?? "(missing)"}`);
+        return reply.badRequest(`Unsupported image type: ${rawContentType ?? "(missing)"}`);
       }
       if (!Buffer.isBuffer(request.body)) return reply.badRequest("expected a raw image body");
       // Content check, not just Content-Type: rejects a body whose actual

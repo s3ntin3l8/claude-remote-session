@@ -363,7 +363,15 @@ export async function internalRoutes(app: FastifyInstance) {
   // host's filesystem — where the CLI reading it back by path actually
   // runs, for a remote-hosted project. cwd/mime travel as query params (a
   // raw-body POST has no room for a JSON envelope alongside the image
-  // bytes); the request body is the image itself. Scoped to this plugin's
+  // bytes); the request body is the image itself. cwd is confined to this
+  // agent's own PROJECTS_ROOTS via resolveWithinRoots — the same barrier
+  // /internal/actions, /internal/dock, and /internal/github-repo already
+  // apply to a caller-supplied cwd. Unlike those read-only routes (and
+  // unlike /internal/sessions/ws/attach's exec-only use of cwd), this route
+  // actually creates a directory and writes a file, so an unrestricted cwd
+  // here is a real filesystem-write sink, not just a read path — CodeQL
+  // flagged exactly that (uncontrolled data in a path expression reaching
+  // writeFileSync/mkdirSync in session-upload.ts). Scoped to this plugin's
   // own encapsulated context, so it never affects how any other route file
   // parses its own request bodies.
   app.addContentTypeParser(/^image\//, { parseAs: "buffer" }, (_req, body, done) => {
@@ -376,6 +384,8 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { cwd, mime } = request.query;
       if (!cwd || !mime) return reply.badRequest("cwd and mime query params are required");
+      const resolvedCwd = resolveWithinRoots(app, cwd);
+      if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
       if (!extensionForMime(mime)) return reply.badRequest(`Unsupported image type: ${mime}`);
       if (!Buffer.isBuffer(request.body)) return reply.badRequest("expected a raw image body");
       // Content check, not just Content-Type: rejects a body whose actual
@@ -385,7 +395,7 @@ export async function internalRoutes(app: FastifyInstance) {
         return reply.badRequest("File content does not match the declared image type");
       }
 
-      const uploadPath = saveSessionUpload(expandHome(cwd), request.body, mime);
+      const uploadPath = saveSessionUpload(resolvedCwd, request.body, mime);
       return { path: uploadPath };
     },
   );

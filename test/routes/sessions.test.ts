@@ -310,6 +310,32 @@ describe("sessions route", () => {
       await app.close();
     });
 
+    it("accepts a Content-Type with a charset parameter (Hermes review, PR #106)", async () => {
+      const app = await buildApp();
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "sessions-upload-charset-"));
+      const projectId = await createProjectWithCwd(app, cwd);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/uploads`,
+        headers: { "content-type": "image/png; charset=binary" },
+        payload: PNG_BYTES,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const { path: uploadPath } = res.json();
+      expect(uploadPath.endsWith(".png")).toBe(true);
+
+      fs.rmSync(cwd, { recursive: true, force: true });
+      await app.close();
+    });
+
     it("404s for an unknown session id", async () => {
       const app = await buildApp();
       const res = await app.inject({

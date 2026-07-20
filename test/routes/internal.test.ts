@@ -457,7 +457,9 @@ describe("internal routes (agent role, issue #26)", () => {
   describe("POST /internal/uploads (issue #68)", () => {
     it("writes an image under <cwd>/.tessera-uploads and returns its absolute path", async () => {
       const app = await buildApp();
-      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "internal-upload-"));
+      // Must be within projectsRoot: this route now confines cwd via
+      // resolveWithinRoots, same as /internal/actions and /internal/dock.
+      const cwd = fs.mkdtempSync(path.join(projectsRoot, "upload-"));
       const buffer = PNG_BYTES;
 
       const res = await app.inject({
@@ -476,43 +478,49 @@ describe("internal routes (agent role, issue #26)", () => {
       await app.close();
     });
 
-    it("expands a leading ~ in cwd against this host's own home dir", async () => {
+    it("rejects a cwd outside this agent's own PROJECTS_ROOTS (CodeQL: uncontrolled data in path expression)", async () => {
       const app = await buildApp();
+      const outsideRoots = fs.mkdtempSync(path.join(os.tmpdir(), "internal-upload-outside-"));
+
       const res = await app.inject({
         method: "POST",
-        url: `/internal/uploads?cwd=%7E&mime=image%2Fpng`,
+        url: `/internal/uploads?cwd=${encodeURIComponent(outsideRoots)}&mime=image%2Fpng`,
         headers: { authorization: `Bearer ${TOKEN}`, "content-type": "image/png" },
         payload: PNG_BYTES,
       });
+      expect(res.statusCode).toBe(400);
 
-      expect(res.statusCode).toBe(200);
-      expect(res.json().path.startsWith(path.join(os.homedir(), ".tessera-uploads"))).toBe(true);
-
-      fs.rmSync(path.join(os.homedir(), ".tessera-uploads"), { recursive: true, force: true });
+      fs.rmSync(outsideRoots, { recursive: true, force: true });
       await app.close();
     });
 
     it("rejects a mime type outside the allow-list", async () => {
       const app = await buildApp();
+      const cwd = fs.mkdtempSync(path.join(projectsRoot, "upload-"));
       const res = await app.inject({
         method: "POST",
-        url: `/internal/uploads?cwd=%2Ftmp&mime=image%2Fsvg%2Bxml`,
+        url: `/internal/uploads?cwd=${encodeURIComponent(cwd)}&mime=image%2Fsvg%2Bxml`,
         headers: { authorization: `Bearer ${TOKEN}`, "content-type": "image/svg+xml" },
         payload: Buffer.from("<svg/>"),
       });
       expect(res.statusCode).toBe(400);
+
+      fs.rmSync(cwd, { recursive: true, force: true });
       await app.close();
     });
 
     it("rejects a body whose bytes don't match the declared mime, even with an allow-listed Content-Type", async () => {
       const app = await buildApp();
+      const cwd = fs.mkdtempSync(path.join(projectsRoot, "upload-"));
       const res = await app.inject({
         method: "POST",
-        url: `/internal/uploads?cwd=%2Ftmp&mime=image%2Fpng`,
+        url: `/internal/uploads?cwd=${encodeURIComponent(cwd)}&mime=image%2Fpng`,
         headers: { authorization: `Bearer ${TOKEN}`, "content-type": "image/png" },
         payload: Buffer.from("<html><script>alert(1)</script></html>"),
       });
       expect(res.statusCode).toBe(400);
+
+      fs.rmSync(cwd, { recursive: true, force: true });
       await app.close();
     });
 
