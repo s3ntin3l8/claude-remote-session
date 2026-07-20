@@ -38,10 +38,17 @@ function reservedKeysFromSettings(keyCapture: AppSettings["terminal"]["keyCaptur
   return keys;
 }
 
-function attachKeyConflictHandler(term: Terminal, reservedKeys: Set<string>): void {
+function attachKeyConflictHandler(term: Terminal, reservedKeys: Set<string>, onPaste?: () => void): void {
   term.attachCustomKeyEventHandler((event) => {
-    if (event.type === "keydown" && event.ctrlKey && reservedKeys.has(event.key.toLowerCase())) {
-      event.preventDefault();
+    if (event.type === "keydown" && event.ctrlKey) {
+      if (event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        onPaste?.();
+        return false;
+      }
+      if (reservedKeys.has(event.key.toLowerCase())) {
+        event.preventDefault();
+      }
     }
     return true;
   });
@@ -59,6 +66,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [copied, setCopied] = useState(false);
   // Exposes a manual "Retry now" (design's Disconnected state) without
   // remounting the terminal/xterm instance itself — `connect`/backoff live
   // inside the effect below (closed over the real WS + timer), so this ref
@@ -90,6 +98,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
   // construction, so e.g. a reconnect that happens minutes into a session
   // uses whatever maxAttempts is current, not whatever was true at mount.
   const prefsRef = useRef(terminalSettings);
+  const pasteHandlerRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const container = containerRef.current;
@@ -125,7 +134,9 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     term.loadAddon(new Unicode11Addon());
     term.unicode.activeVersion = "11";
     term.loadAddon(new WebLinksAddon());
-    attachKeyConflictHandler(term, reservedKeysFromSettings(prefs.keyCapture));
+    attachKeyConflictHandler(term, reservedKeysFromSettings(prefs.keyCapture), () =>
+      pasteHandlerRef.current(),
+    );
     // Note: no separate "wait for the web font to load, then re-fit" step
     // here — the settings-sync effect below runs immediately after this
     // mount effect (on every render, including the first) and already does
@@ -181,6 +192,8 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     // window resize). A plain `resize` listener catches those misses.
     window.addEventListener("resize", refit);
 
+    let copyToastTimer: ReturnType<typeof setTimeout> | null = null;
+
     // "Copy on select" (Settings -> Terminal behavior) — xterm doesn't copy
     // to the system clipboard on its own; onSelectionChange only fires when
     // the selection actually changes, so a click that clears a selection
@@ -188,8 +201,41 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     const selectionSub = term.onSelectionChange(() => {
       if (!prefsRef.current.copyOnSelect) return;
       const text = term.getSelection();
-      if (text) void navigator.clipboard?.writeText(text).catch(() => {});
+      if (!text) return;
+      if (!navigator.clipboard) {
+        console.warn("[terminal] clipboard API not available (not a secure context)");
+        return;
+      }
+      navigator.clipboard.writeText(text).then(() => {
+        if (destroyed) return;
+        setCopied(true);
+        if (copyToastTimer) clearTimeout(copyToastTimer);
+        copyToastTimer = setTimeout(() => {
+          if (destroyed) return;
+          setCopied(false);
+        }, 1500);
+      }).catch((err: unknown) => {
+        console.warn("[terminal] clipboard write failed:", err);
+      });
     });
+
+    // Ctrl+V paste handler — reads from the system clipboard and writes to
+    // the PTY, regardless of the pasteOnRightClick setting. Registered via
+    // attachKeyConflictHandler above so it works even when the browser wants
+    // to intercept Ctrl+V itself.
+    pasteHandlerRef.current = () => {
+      if (!navigator.clipboard) {
+        console.warn("[terminal] clipboard API not available (not a secure context)");
+        return;
+      }
+      navigator.clipboard.readText().then((text) => {
+        if (text && ws?.readyState === WebSocket.OPEN) {
+          ws.send(new TextEncoder().encode(text));
+        }
+      }).catch(() => {
+        console.warn("[terminal] clipboard read denied");
+      });
+    };
 
     // "Paste on right-click" (Settings -> Terminal behavior) — replaces the
     // browser's own context menu with a direct paste when enabled, matching
@@ -197,17 +243,17 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     const onContextMenu = (event: MouseEvent) => {
       if (!prefsRef.current.pasteOnRightClick) return;
       event.preventDefault();
-      void navigator.clipboard
-        ?.readText()
-        .then((text) => {
-          if (text && ws?.readyState === WebSocket.OPEN) {
-            ws.send(new TextEncoder().encode(text));
-          }
-        })
-        .catch(() => {
-          // Clipboard read can be denied (permissions, non-HTTPS context) —
-          // silently no-op rather than surfacing a paste failure.
-        });
+      if (!navigator.clipboard) {
+        console.warn("[terminal] clipboard API not available (not a secure context)");
+        return;
+      }
+      navigator.clipboard.readText().then((text) => {
+        if (text && ws?.readyState === WebSocket.OPEN) {
+          ws.send(new TextEncoder().encode(text));
+        }
+      }).catch(() => {
+        console.warn("[terminal] clipboard read denied");
+      });
     };
     container.addEventListener("contextmenu", onContextMenu);
 
@@ -278,6 +324,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     return () => {
       destroyed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (copyToastTimer) clearTimeout(copyToastTimer);
       resizeObserver.disconnect();
       window.removeEventListener("resize", refit);
       container.removeEventListener("contextmenu", onContextMenu);
@@ -315,7 +362,9 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
     term.options.fontSize = terminalSettings.fontSize;
     term.options.fontFamily = `'${terminalSettings.fontFamily}', 'Geist Mono', monospace`;
     term.options.theme = buildXtermTheme(terminalSettings.colorScheme, theme);
-    attachKeyConflictHandler(term, reservedKeysFromSettings(terminalSettings.keyCapture));
+    attachKeyConflictHandler(term, reservedKeysFromSettings(terminalSettings.keyCapture), () =>
+      pasteHandlerRef.current(),
+    );
 
     // The WebGL renderer caches glyphs (size and color both) in a texture
     // atlas; reassigning these options alone leaves already-rendered glyphs
@@ -370,6 +419,7 @@ export function TerminalPane(props: { params: TerminalPaneParams }) {
           )}
         </div>
       )}
+      {copied && <div className="terminal-copy-indicator">Copied</div>}
     </div>
   );
 }
