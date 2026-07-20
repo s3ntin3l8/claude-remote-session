@@ -27,7 +27,7 @@ function createDataTransfer(): DataTransfer {
     get types() {
       return Array.from(map.keys());
     },
-    effectAllowed: "none" as EffectAllowed,
+    effectAllowed: "none" as DataTransfer["effectAllowed"],
     dropEffect: "none" as DataTransfer["dropEffect"],
     clearData(format) {
       if (format) map.delete(format);
