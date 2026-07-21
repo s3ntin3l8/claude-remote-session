@@ -7,7 +7,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { ImageIcon, RefreshIcon, SpinnerIcon, WifiOffIcon } from "./icons.js";
 import { useDashboardStore } from "./store.js";
-import { buildXtermTheme } from "./terminalTheme.js";
+import { buildXtermTheme, getSchemeBackground } from "./terminalTheme.js";
 import { api, type AppSettings } from "./api.js";
 import { registerTerminalRepaint, unregisterTerminalRepaint } from "./terminalRepaintRegistry.js";
 
@@ -735,6 +735,14 @@ export function TerminalPane(props: {
         style={{
           width: "100%",
           height: "100%",
+          // xterm's own canvas covers the terminal area itself, but not the
+          // padding ring around it — without an explicit background here,
+          // that ring (and the dockview chrome peeking through it) shows
+          // through as an unrelated color when it doesn't match the active
+          // scheme (issue #132). getSchemeBackground (not buildXtermTheme)
+          // since only the background is needed here, not a full 16-color
+          // xterm theme object.
+          background: getSchemeBackground(terminalSettings.colorScheme, theme),
           padding: `${terminalSettings.padding}px`,
           boxSizing: "border-box",
         }}

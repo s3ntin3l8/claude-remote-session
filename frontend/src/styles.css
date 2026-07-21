@@ -969,6 +969,25 @@ body {
   background: var(--bg);
 }
 
+/* Dockview's own theme classes (dockview.css) set --dv-* directly on this
+   element, which always wins over an inherited value of the same name no
+   matter how it's set upstream — so these overrides must match or beat that
+   selector's specificity (0,1,0), not just live somewhere in the cascade.
+   Only background/border surfaces are remapped to the active terminal
+   scheme's background (--tessera-chrome-bg, set in App.tsx); tab text-color
+   vars are left as dockview's own light/dark defaults (issue #132). */
+.dockview-container .dockview-theme-light,
+.dockview-container .dockview-theme-dark {
+  --dv-group-view-background-color: var(--tessera-chrome-bg, var(--bg));
+  --dv-tabs-and-actions-container-background-color: var(--tessera-chrome-bg, var(--bg));
+  --dv-activegroup-visiblepanel-tab-background-color: var(--tessera-chrome-bg, var(--bg));
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--tessera-chrome-bg, var(--bg));
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--tessera-chrome-bg, var(--bg));
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--tessera-chrome-bg, var(--bg));
+  --dv-tab-divider-color: var(--tessera-chrome-bg, var(--bg));
+  --dv-separator-border: var(--border);
+}
+
 .mobile-tabs {
   display: none;
   flex-shrink: 0;

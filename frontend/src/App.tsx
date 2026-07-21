@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { DockviewReact } from "dockview-react";
 import type { DockviewApi, DockviewReadyEvent, IDockviewPanelProps } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
@@ -28,6 +29,7 @@ import { Dock } from "./Dock.js";
 import { GridIcon, ServerRackIcon } from "./icons.js";
 import { useDashboardStore, LIVE_REFRESH_INTERVAL_MS } from "./store.js";
 import type { Session } from "./api.js";
+import { getSchemeBackground } from "./terminalTheme.js";
 import { playNotificationSound } from "./notifySound.js";
 import { randomPanelId } from "./random-id.js";
 import { formatPaneTitle, initialPaneTitle } from "./paneTitle.js";
@@ -798,6 +800,15 @@ export function App() {
     return ids;
   }, [mobilePanels, sessions]);
 
+  // Dockview ships its own hardcoded light/dark chrome colors, unaware of
+  // the selected terminal color scheme — so a scheme's background (e.g.
+  // Dracula's off-white) visibly seams against dockview's fixed white/black
+  // panel and tab-bar surfaces (issue #132). Exposing the scheme's
+  // background as a custom property here lets the CSS in styles.css
+  // override just those `--dv-*` surfaces to match, without touching
+  // dockview's tab text colors.
+  const dockviewChromeBg = getSchemeBackground(settings.terminal.colorScheme, theme);
+
   return (
     <div
       className={`app cmux-root${theme === "light" ? " light" : ""}${sidebarOpen ? " sb-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}${settings.sidebarDensity === "compact" ? " density-compact" : ""}`}
@@ -869,7 +880,10 @@ export function App() {
             <button className="sidebar-toggle" onClick={toggleSidebar}>
               ☰
             </button>
-            <div className="dockview-container">
+            <div
+              className="dockview-container"
+              style={{ "--tessera-chrome-bg": dockviewChromeBg } as CSSProperties}
+            >
               <DockviewReact
                 ref={dockviewRef}
                 className={theme === "light" ? "dockview-theme-light" : "dockview-theme-dark"}
