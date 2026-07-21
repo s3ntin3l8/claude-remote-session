@@ -443,25 +443,39 @@ export class Session {
     // would immediately wipe out the suppression this very call is about to
     // set.
     this.cancelPendingNudge();
-    const dipRows = Math.max(4, Math.floor(this.rows / 2));
     // Suppress scrollback capture for the whole dip-then-restore cycle plus a
     // grace period past the final resize — see suppressScrollback's
     // docstring for why the window has to extend past resize() returning.
     if (suppressCapture) this.suppressScrollback = true;
-    this.nudgeTimer = setTimeout(() => {
-      this.ptyProcess?.resize(this.cols, dipRows);
-      this.nudgeTimer = setTimeout(() => {
-        this.ptyProcess?.resize(this.cols, this.rows);
-        if (suppressCapture) {
-          this.nudgeTimer = setTimeout(() => {
-            this.suppressScrollback = false;
-            this.nudgeTimer = null;
-          }, NUDGE_REPAINT_GRACE_MS);
-        } else {
-          this.nudgeTimer = null;
-        }
-      }, 400);
-    }, 300);
+    const dipRows = Math.max(4, Math.floor(this.rows / 2));
+    this.nudgeTimer = setTimeout(() => this.nudgeDip(dipRows, suppressCapture), 300);
+  }
+
+  // The dip/restore/grace-reset stages below are split into named steps
+  // (rather than nesting them as inline closures inside nudgeRedraw) purely
+  // for readability — each one's single job reads on its own instead of
+  // three levels deep. They still form one strictly-sequential chain, each
+  // scheduling the next via `this.nudgeTimer`, which is exactly what makes a
+  // single handle (rather than a list of timers) enough to track and cancel
+  // the whole in-flight cycle from cancelPendingNudge().
+
+  private nudgeDip(dipRows: number, suppressCapture: boolean): void {
+    this.ptyProcess?.resize(this.cols, dipRows);
+    this.nudgeTimer = setTimeout(() => this.nudgeRestore(suppressCapture), 400);
+  }
+
+  private nudgeRestore(suppressCapture: boolean): void {
+    this.ptyProcess?.resize(this.cols, this.rows);
+    if (suppressCapture) {
+      this.nudgeTimer = setTimeout(() => this.nudgeGraceReset(), NUDGE_REPAINT_GRACE_MS);
+    } else {
+      this.nudgeTimer = null;
+    }
+  }
+
+  private nudgeGraceReset(): void {
+    this.suppressScrollback = false;
+    this.nudgeTimer = null;
   }
 
   /**
