@@ -57,8 +57,10 @@ export interface SessionInfo {
   lastActivityAt: number | null;
   /** "working" if the terminal title says so, else if output has arrived
    * recently AND persisted for at least SUSTAIN_MS (so a single spawn-time
-   * prompt-draw burst doesn't count), else "idle" — a coarse heuristic, not
-   * a real "is the program busy" signal. */
+   * prompt-draw burst doesn't count) AND isn't closely following a user
+   * keystroke (see USER_INPUT_ECHO_MS — keystroke echo shouldn't read as
+   * work), else "idle" — a coarse heuristic, not a real "is the program
+   * busy" signal. */
   activity: "working" | "idle";
   /** True once a BEL or OSC 9/777 notification sequence has been observed
    * without being cleared since — see the attention-clear check in
@@ -129,6 +131,24 @@ const STREAK_GAP_MS = 4_000;
 // "working" rather than a single spawn-time prompt-draw burst.
 const SUSTAIN_MS = 1_000;
 
+// Output arriving within this window of a user keystroke is treated as echo
+// or a redraw of that input, not autonomous work — see toInfo()'s timing
+// fall-through (issue #97: a TUI's own keystroke echo kept accruing a
+// "sustained" streak while the user was just typing at its prompt, reading as
+// "working"). Deliberately short and NOT the settings-derived idle threshold
+// (30s default): pressing Enter to submit a prompt is also a write(), and a
+// 30s window would mask that much genuine agent output as idle immediately
+// after submission. Kept close to SUSTAIN_MS's scale instead, so only the
+// first moment after a keystroke/submit is suppressed.
+//
+// Known limitation: write() also carries a couple of automated
+// terminal-protocol replies from the same browser->pty channel (OSC 10/11/12
+// color-query responses and a theme-change OSC push in TerminalPane.tsx) —
+// neither is a recurring per-write source, so the worst case is a rare,
+// self-limiting false "idle" of at most this long right after one of those,
+// not activity being masked indefinitely.
+const USER_INPUT_ECHO_MS = 1_000;
+
 // Deterministic (no timestamp) so a *future* process — one that never
 // tracked this session in memory at all, e.g. right after a restart — can
 // still reference the exact same scope to fully terminate it. See
@@ -194,6 +214,11 @@ export class Session {
   private activityStreakStart: number | null = null;
   private attentionAt: number | null = null;
   private lastTitle: string | null = null;
+  // Ms-epoch of the last write() call (user keystrokes, plus a couple of
+  // automated terminal-protocol replies routed through the same browser->pty
+  // channel — see USER_INPUT_ECHO_MS's docstring). Used by toInfo()'s timing
+  // fall-through to tell keystroke echo apart from autonomous output.
+  private lastUserInputAt: number | null = null;
 
   constructor(opts: {
     id: string;
@@ -525,6 +550,7 @@ export class Session {
   }
 
   write(data: string): void {
+    this.lastUserInputAt = Date.now();
     this.ptyProcess?.write(data);
   }
 
@@ -605,7 +631,12 @@ export class Session {
         this.activityStreakStart !== null &&
         this.lastActivityAt !== null &&
         this.lastActivityAt - this.activityStreakStart >= SUSTAIN_MS;
-      activity = recent && sustained ? "working" : "idle";
+      // Recent output that closely follows a keystroke is more likely echo
+      // or a redraw of that input than autonomous work — see
+      // USER_INPUT_ECHO_MS's docstring.
+      const echoingInput =
+        this.lastUserInputAt !== null && Date.now() - this.lastUserInputAt < USER_INPUT_ECHO_MS;
+      activity = recent && sustained && !echoingInput ? "working" : "idle";
     }
     return {
       id: this.id,

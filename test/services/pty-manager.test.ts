@@ -728,6 +728,67 @@ describe("PtyManager", () => {
       }
     });
 
+    it("reads as idle while output closely follows a keystroke, e.g. a TUI echoing what the user types (#97)", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const start = Date.now();
+        vi.setSystemTime(start);
+        session.write("h");
+        fakePtyChildren[0].emitData("h"); // echoed keystroke
+        expect(session.toInfo().activity).toBe("idle"); // single burst anyway
+
+        // A second keystroke 1.2s later would normally push this streak past
+        // SUSTAIN_MS into "working" (see the previous test) — but each write()
+        // is followed immediately by its echo, so the streak never stops
+        // looking like echo rather than autonomous output.
+        vi.setSystemTime(start + 1200);
+        session.write("e");
+        fakePtyChildren[0].emitData("e");
+        expect(session.toInfo().activity).toBe("idle");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resumes reading as working once output persists well past the echo window, e.g. real agent output after a submit", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const start = Date.now();
+        vi.setSystemTime(start);
+        session.write("prompt\n"); // user submits, no further input after this
+
+        vi.setSystemTime(start + 1200);
+        fakePtyChildren[0].emitData("agent output 1"); // streak just started
+        expect(session.toInfo().activity).toBe("idle"); // not sustained yet
+
+        // 2.4s past the submit — well outside USER_INPUT_ECHO_MS — so this
+        // sustained streak is genuine autonomous work, not echo.
+        vi.setSystemTime(start + 2400);
+        fakePtyChildren[0].emitData("agent output 2");
+        expect(session.toInfo().activity).toBe("working");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps accruing a single streak across gaps shorter than STREAK_GAP_MS, e.g. periodic status pings", async () => {
       const session = manager.getOrCreate({
         id: "1",
