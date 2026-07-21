@@ -881,16 +881,24 @@ export function App() {
                 v{currentVersion} → v{updateCheck.latestVersion} available
               </span>
               <span className="update-banner-subtext">Click for details</span>
-              <button
+              <span
                 className="update-banner-dismiss"
+                role="button"
+                tabIndex={0}
                 onClick={(e) => {
                   e.stopPropagation();
                   dismissUpdate();
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.stopPropagation();
+                    dismissUpdate();
+                  }
+                }}
                 title="Dismiss until next version"
               >
                 ×
-              </button>
+              </span>
             </div>
           )}
           <div className={`grid-area-body${!backendReachable ? " dimmed" : ""}`}>
