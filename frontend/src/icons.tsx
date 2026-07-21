@@ -398,6 +398,21 @@ export function GitHubIcon(props: IconProps) {
   );
 }
 
+// Git status/branch trigger (issue #76/#96) — the standard three-circle
+// branch glyph, a generic line icon (unlike GitHubIcon's brand mark above)
+// so it reads distinctly from the GitHub integration's own icon.
+export function GitBranchIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <line x1="6" y1="3" x2="6" y2="15" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="6" cy="6" r="3" />
+      <circle cx="18" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
+    </Svg>
+  );
+}
+
 // Browser preview pane trigger (issue #28) — a generic line glyph, matching
 // this file's usual convention (unlike GitHubIcon's brand mark above).
 export function GlobeIcon(props: IconProps) {

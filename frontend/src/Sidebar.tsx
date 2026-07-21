@@ -174,6 +174,28 @@ function ProjectSection({
   // only appearing once a remote host exists.
   const host = project.hostId !== LOCAL_HOST_ID ? hosts.find((h) => h.id === project.hostId) : null;
 
+  // Per-project git dirty badge (issue #76) — sourced from the store's
+  // gitStatuses map (polled alongside sessions, see store.ts's
+  // startLiveRefresh). A missing entry (not fetched yet, right after mount)
+  // renders the same as `null` (not a repo, or an unreachable remote host)
+  // — both read as "nothing to report" rather than a distinct loading state,
+  // which would just flicker on every mount.
+  const gitStatus = useDashboardStore((s) => s.gitStatuses[project.id]);
+  const gitDotClass = !gitStatus
+    ? "none"
+    : gitStatus.hasConflicts
+      ? "conflict"
+      : gitStatus.isClean
+        ? "clean"
+        : "dirty";
+  const gitDotTitle = !gitStatus
+    ? "Not a git repository"
+    : gitStatus.hasConflicts
+      ? `${gitStatus.branch}: unresolved merge conflicts`
+      : gitStatus.isClean
+        ? `${gitStatus.branch}: clean`
+        : `${gitStatus.branch}: ${gitStatus.files.length} changed file${gitStatus.files.length === 1 ? "" : "s"}`;
+
   return (
     <div className="project-row">
       <div className="project-row-header" onClick={() => setManualCollapsed(!collapsed)}>
@@ -185,6 +207,7 @@ function ProjectSection({
         <span className="project-row-name" title={project.cwd}>
           {project.name}
         </span>
+        <span className={`project-git-dot ${gitDotClass}`} title={gitDotTitle} />
         {host && (
           <span className="project-host-badge" title={`Runs on host: ${host.name}`}>
             <HostsIcon size={10} />

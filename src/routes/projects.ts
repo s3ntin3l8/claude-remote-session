@@ -15,6 +15,8 @@ import { LOCAL_HOST_ID, getHostRow } from "../services/host-registry.js";
 import { getRemoteHostClient } from "../services/remote-host-client.js";
 import { resolveBackend } from "../services/session-backend.js";
 import { parseGitRemote, type GitHubRepoRef } from "../services/git-remote.js";
+import { readGitBranch } from "../services/git-branch.js";
+import { getGitStatus, type GitStatus } from "../services/git-status.js";
 import { getToken } from "../services/github-integration.js";
 import { GitHubApiError, getRepoStatus } from "../services/github.js";
 import { detectDevServerPortForSessionIds } from "../services/dev-server-detect.js";
@@ -113,6 +115,15 @@ export async function projectsRoute(app: FastifyInstance) {
   // sessions, rather than one query per project — this list is polled on
   // every dashboard refresh, so an N+1 here would cost real latency for a
   // feature nobody may even be using.
+  //
+  // currentBranch (issue #96) rides along on this same response rather than
+  // a per-project fetch — it's cheap for a local project (git-branch.ts's
+  // pure HEAD read) and, for a remote one, no worse than one extra
+  // /internal/git-branch round trip per project on an already-polled list.
+  // A single unreachable remote host degrades that project's own
+  // currentBranch to null rather than failing the whole list — the same
+  // "widget just doesn't render" posture as the /github and /git-status
+  // routes below, just without a status code to express it through here.
   app.get("/api/projects", async () => {
     const rows = app.db.select().from(projects).all();
 
@@ -128,18 +139,37 @@ export async function projectsRoute(app: FastifyInstance) {
       dockSessionIdsByProject.set(session.projectId, ids);
     }
 
-    return rows.map((row) => ({
-      ...row,
-      // Remote-hosted projects are skipped outright, not just "usually
-      // null": app.pty only tracks sessions spawned/attached by this same
-      // process, and a remote project's dock session lives in its owning
-      // agent's own PtyManager instead — see dev-server-detect.ts's own
-      // comment.
-      detectedDevServerPort:
-        row.hostId === LOCAL_HOST_ID
-          ? detectDevServerPortForSessionIds(app, dockSessionIdsByProject.get(row.id) ?? [])
-          : null,
-    }));
+    return Promise.all(
+      rows.map(async (row) => {
+        let currentBranch: string | null;
+        if (row.hostId === LOCAL_HOST_ID) {
+          currentBranch = readGitBranch(row.cwd);
+        } else {
+          try {
+            currentBranch = await getRemoteHostClient(app, row.hostId).resolveGitBranch(row.cwd);
+          } catch (err) {
+            app.log.warn(
+              { hostId: row.hostId, projectId: row.id, err },
+              "host unreachable, currentBranch unavailable",
+            );
+            currentBranch = null;
+          }
+        }
+        return {
+          ...row,
+          currentBranch,
+          // Remote-hosted projects are skipped outright, not just "usually
+          // null": app.pty only tracks sessions spawned/attached by this
+          // same process, and a remote project's dock session lives in its
+          // owning agent's own PtyManager instead — see dev-server-detect.ts's
+          // own comment.
+          detectedDevServerPort:
+            row.hostId === LOCAL_HOST_ID
+              ? detectDevServerPortForSessionIds(app, dockSessionIdsByProject.get(row.id) ?? [])
+              : null,
+        };
+      }),
+    );
   });
 
   // A real filesystem scan (readdirSync + existsSync per candidate), so
@@ -296,6 +326,40 @@ export async function projectsRoute(app: FastifyInstance) {
         reply.code(204);
         return;
       }
+    },
+  );
+
+  // Fuller git status for the GitPanel/sidebar badge (issue #76): branch,
+  // short hash, ahead/behind vs. upstream, and per-file status — cloned from
+  // the /github handler just above. Same "widget just doesn't render"
+  // degradation: 204 when the project isn't a git repo (or `git` itself
+  // fails), 503 only when a remote host is genuinely unreachable.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/git-status",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const projectId = Number(request.params.id);
+      if (!Number.isInteger(projectId)) return reply.badRequest("Invalid project id");
+
+      const [project] = app.db.select().from(projects).where(eq(projects.id, projectId)).all();
+      if (!project) return reply.notFound();
+
+      let status: GitStatus | null;
+      if (project.hostId === LOCAL_HOST_ID) {
+        status = await getGitStatus(project.cwd);
+      } else {
+        try {
+          status = await getRemoteHostClient(app, project.hostId).resolveGitStatus(project.cwd);
+        } catch (err) {
+          app.log.warn({ hostId: project.hostId, err }, "host unreachable, git status unavailable");
+          return reply.serviceUnavailable(`Host ${project.hostId} is unreachable`);
+        }
+      }
+      if (!status) {
+        reply.code(204);
+        return;
+      }
+      return status;
     },
   );
 

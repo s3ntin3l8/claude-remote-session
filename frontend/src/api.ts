@@ -30,6 +30,12 @@ export interface Project {
   // null whenever nothing was detected (no dock session, no banner yet, or
   // a remote-hosted project — see dev-server-detect.ts).
   detectedDevServerPort: string | null;
+  // Always-on branch label (issue #96) — the project's current checkout, a
+  // short detached-HEAD SHA, or null when it's not a git repo (or, for a
+  // remote-hosted project, its host is unreachable). Cheap enough to ride
+  // along on every GET /api/projects rather than needing its own fetch —
+  // see PaneTab.tsx/Sidebar.tsx for where this renders.
+  currentBranch: string | null;
   createdAt: string;
 }
 
@@ -183,6 +189,27 @@ export interface GitHubStatus {
   issues: GitHubIssueOrPr[];
   actionsRuns: GitHubActionsRun[];
   ciStatus: GitHubCiStatus;
+}
+
+// Mirrors src/services/git-status.ts's GitStatus 1:1 (issue #76).
+// GET /api/projects/:id/git-status returns 204 (no body) for every "not
+// applicable" case (not a git repo, or `git` itself failed) — callers treat
+// that identically to `null`, same rule as GitHubStatus above.
+export type GitFileStatusCode = "M" | "A" | "D" | "U" | "?";
+
+export interface GitFileStatus {
+  path: string;
+  status: GitFileStatusCode;
+}
+
+export interface GitStatus {
+  branch: string;
+  hash: string | null;
+  ahead: number;
+  behind: number;
+  files: GitFileStatus[];
+  isClean: boolean;
+  hasConflicts: boolean;
 }
 
 export interface DockControl {
@@ -454,6 +481,10 @@ export const api = {
   // that case an honest return type instead of asserting GitHubStatus.
   getProjectGitHub: (projectId: number) =>
     request<GitHubStatus | undefined>(`/api/projects/${projectId}/github`),
+
+  // undefined for the 204 "not applicable" response (see GitStatus above).
+  getProjectGitStatus: (projectId: number) =>
+    request<GitStatus | undefined>(`/api/projects/${projectId}/git-status`),
 
   listSessions: (opts?: { projectId?: number; kind?: "terminal" | "dock" }) => {
     const params = new URLSearchParams();

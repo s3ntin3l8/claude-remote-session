@@ -23,6 +23,7 @@ const PROJECT: Project = {
   hostId: "local",
   devServerUrl: null,
   detectedDevServerPort: null,
+  currentBranch: null,
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
@@ -49,6 +50,7 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={onOpenGitHub}
+        onOpenGit={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
@@ -57,6 +59,27 @@ describe("CommandPalette -> Integrations section", () => {
 
     await user.click(await screen.findByText(/GitHub: tessera/));
     expect(onOpenGitHub).toHaveBeenCalledWith(PROJECT.id);
+  });
+
+  it("opens the git status panel for the current project (issue #76)", async () => {
+    const onOpenGit = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <CommandPalette
+        scope="project"
+        projectId={PROJECT.id}
+        onClose={vi.fn()}
+        onLaunched={vi.fn()}
+        onOpenGitHub={vi.fn()}
+        onOpenGit={onOpenGit}
+        onOpenBrowser={vi.fn()}
+        onOpenBlankBrowser={vi.fn()}
+        onOpenIntegrationsSettings={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByText(/Git: tessera/));
+    expect(onOpenGit).toHaveBeenCalledWith(PROJECT.id);
   });
 
   it("opens the browser preview panel for the current project", async () => {
@@ -69,6 +92,7 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
+        onOpenGit={vi.fn()}
         onOpenBrowser={onOpenBrowser}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}
@@ -89,6 +113,7 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
+        onOpenGit={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenBlankBrowser={onOpenBlankBrowser}
         onOpenIntegrationsSettings={vi.fn()}
@@ -109,6 +134,7 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
+        onOpenGit={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={onOpenIntegrationsSettings}
@@ -128,6 +154,7 @@ describe("CommandPalette -> Integrations section", () => {
         onClose={vi.fn()}
         onLaunched={vi.fn()}
         onOpenGitHub={vi.fn()}
+        onOpenGit={vi.fn()}
         onOpenBrowser={vi.fn()}
         onOpenBlankBrowser={vi.fn()}
         onOpenIntegrationsSettings={vi.fn()}

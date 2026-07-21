@@ -16,6 +16,8 @@ import type { TerminalPaneParams } from "./TerminalPane.js";
 import { repaintAllTerminals } from "./terminalRepaintRegistry.js";
 import { GitHubPanel } from "./GitHubPanel.js";
 import type { GitHubPanelParams } from "./GitHubPanel.js";
+import { GitPanel } from "./GitPanel.js";
+import type { GitPanelParams } from "./GitPanel.js";
 import { BrowserPanel } from "./BrowserPanel.js";
 import type { BrowserPanelParams } from "./BrowserPanel.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
@@ -85,6 +87,17 @@ function GitHubPanelWrapper(props: IDockviewPanelProps<GitHubPanelParams>) {
   );
 }
 
+// Same reasoning as GitHubPanelWrapper above — a crashing status fetch
+// shouldn't blank the whole dashboard either.
+function GitPanelWrapper(props: IDockviewPanelProps<GitPanelParams>) {
+  const [resetKey, setResetKey] = useState(0);
+  return (
+    <ErrorBoundary onReset={() => setResetKey((k) => k + 1)}>
+      <GitPanel key={resetKey} params={props.params} />
+    </ErrorBoundary>
+  );
+}
+
 // Same reasoning as GitHubPanelWrapper above — a crashing iframe/preview
 // fetch shouldn't blank the whole dashboard either.
 function BrowserPanelWrapper(props: IDockviewPanelProps<BrowserPanelParams>) {
@@ -99,6 +112,7 @@ function BrowserPanelWrapper(props: IDockviewPanelProps<BrowserPanelParams>) {
 const components = {
   terminal: TerminalPanelWrapper,
   github: GitHubPanelWrapper,
+  git: GitPanelWrapper,
   browser: BrowserPanelWrapper,
 };
 
@@ -706,6 +720,33 @@ export function App() {
     [dockviewApi, projects, isMobile],
   );
 
+  // Opens (or focuses) the git status panel for a project (issue #76) —
+  // same open-or-focus-by-stable-id shape as onOpenGitHub above, just a
+  // distinct "git-<projectId>" panel id/component so it never collides with
+  // the GitHub integration's own panel for the same project.
+  const onOpenGit = useCallback(
+    (projectId: number) => {
+      if (!dockviewApi) return;
+      const project = projects.find((p) => p.id === projectId);
+      const panelId = `git-${projectId}`;
+      const existing = dockviewApi.getPanel(panelId);
+      if (existing) {
+        existing.api.setActive();
+        if (isMobile) dockviewApi.maximizeGroup(existing);
+      } else {
+        const panel = dockviewApi.addPanel({
+          id: panelId,
+          component: "git",
+          title: project ? `Git: ${project.name}` : "Git",
+          params: { projectId },
+        });
+        if (isMobile) dockviewApi.maximizeGroup(panel);
+      }
+      setSidebarOpen(false);
+    },
+    [dockviewApi, projects, isMobile],
+  );
+
   // Opens (or focuses) a browser preview pane for a project's dev server
   // (issue #28) — same open-or-focus-by-stable-id shape as onOpenGitHub
   // above. BrowserPanel itself resolves/creates the preview and handles the
@@ -1092,6 +1133,7 @@ export function App() {
           }}
           onLaunched={handleLaunched}
           onOpenGitHub={onOpenGitHub}
+          onOpenGit={onOpenGit}
           onOpenBrowser={onOpenBrowser}
           onOpenIntegrationsSettings={() => openSettings("integrations")}
           onOpenBlankBrowser={onOpenBlankBrowser}

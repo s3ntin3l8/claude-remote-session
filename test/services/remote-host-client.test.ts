@@ -59,6 +59,37 @@ describe("RemoteHostClient", () => {
     await expect(client().resolveGitHubRepo("/x/y")).resolves.toBeNull();
   });
 
+  it("resolves a remote project's current branch via /internal/git-branch (issue #96)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, "main"));
+    await expect(client().resolveGitBranch("/x/y")).resolves.toBe("main");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://example.invalid:1234/internal/git-branch?cwd=%2Fx%2Fy",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer tok" }),
+      }),
+    );
+  });
+
+  it("resolves a remote project's git status via /internal/git-status (issue #76)", async () => {
+    const status = {
+      branch: "main",
+      hash: "abc1234",
+      ahead: 0,
+      behind: 0,
+      files: [],
+      isClean: true,
+      hasConflicts: false,
+    };
+    fetchMock.mockResolvedValue(jsonResponse(200, status));
+    await expect(client().resolveGitStatus("/x/y")).resolves.toEqual(status);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://example.invalid:1234/internal/git-status?cwd=%2Fx%2Fy",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer tok" }),
+      }),
+    );
+  });
+
   it("never follows redirects, closing the SSRF bypass a 3xx response would otherwise open (Hermes review, PR #34)", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []));
     await client().discover();

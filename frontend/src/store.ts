@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api, DEFAULT_SETTINGS } from "./api.js";
 import type {
   AppSettings,
+  GitStatus,
   Group,
   Host,
   Project,
@@ -154,6 +155,16 @@ export interface SplitRequest {
 interface DashboardState {
   projects: Project[];
   sessions: Session[];
+  // Per-project git status (issue #76), keyed by project id — powers the
+  // GitPanel's own live re-poll plus the sidebar dirty badge and pane-tab
+  // branch label's dirty ("*") marker. `null` means "fetched, not
+  // applicable" (not a repo, or an unreachable remote host); a missing key
+  // means "not fetched yet" (e.g. right after a project is created, before
+  // the next tick). Absent entirely from the "whole backend down" failure
+  // counter (refreshSessions' own consecutiveSessionFetchFailures) — a
+  // single project's git status being unavailable is routine, not a signal
+  // the backend itself is down.
+  gitStatuses: Record<number, GitStatus | null>;
   workspaces: Workspace[];
   groups: Group[];
   // Registered hosts (issue #26) — includes the always-present "local" row.
@@ -196,6 +207,7 @@ interface DashboardState {
   // falling back to first-available/create-default when that happens.
   activeWorkspaceId: number | null;
   refreshProjects: () => Promise<void>;
+  refreshGitStatuses: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   refreshWorkspaces: () => Promise<void>;
   refreshGroups: () => Promise<void>;
@@ -328,6 +340,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
   return {
     projects: [],
     sessions: [],
+    gitStatuses: {},
     workspaces: [],
     groups: [],
     hosts: [],
@@ -349,6 +362,30 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
 
     refreshProjects: async () => {
       set({ projects: await api.listProjects() });
+      // Fire-and-forget: a project list change (create/rename/delete, or
+      // just this tick's poll) shouldn't make every refreshProjects() caller
+      // wait on N additional git-status round trips too.
+      void get().refreshGitStatuses();
+    },
+
+    // One request per known project, in parallel — the backend caches each
+    // for ~3s server-side (git-status.ts), so this tracks the live-refresh
+    // cadence without re-spawning `git status` on every tick. A single
+    // project's fetch failing (ApiError from a 5xx, or a genuinely
+    // unreachable remote host) degrades just that project's entry to null
+    // rather than dropping every other project's already-fetched status.
+    refreshGitStatuses: async () => {
+      const entries = await Promise.all(
+        get().projects.map(async (project) => {
+          try {
+            const status = await api.getProjectGitStatus(project.id);
+            return [project.id, status ?? null] as const;
+          } catch {
+            return [project.id, null] as const;
+          }
+        }),
+      );
+      set({ gitStatuses: Object.fromEntries(entries) });
     },
 
     refreshSessions: async () => {
@@ -594,6 +631,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
 
       const tick = () => {
         void get().refreshSessions();
+        void get().refreshGitStatuses();
       };
 
       const start = () => {

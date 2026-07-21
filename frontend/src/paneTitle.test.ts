@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatPaneTitle, initialPaneTitle } from "./paneTitle.js";
+import { formatBranchLabel, formatPaneTitle, initialPaneTitle } from "./paneTitle.js";
 import type { Session } from "./api.js";
 
 // Minimal fixture matching api.ts's Session shape — same convention as
@@ -78,5 +78,20 @@ describe("initialPaneTitle", () => {
   it("falls back past a locked-but-empty name (defensive; shouldn't happen via the rename route)", () => {
     const session = makeSession({ name: null, nameLocked: true, lastTitle: "opencode" });
     expect(initialPaneTitle(session, "my-project")).toBe("opencode · my-project");
+  });
+});
+
+describe("formatBranchLabel", () => {
+  it("returns the bare branch name when clean", () => {
+    expect(formatBranchLabel("main", false)).toBe("main");
+  });
+
+  it("appends a trailing asterisk when dirty", () => {
+    expect(formatBranchLabel("main", true)).toBe("main *");
+  });
+
+  it("returns null when there's no known branch, regardless of dirty state", () => {
+    expect(formatBranchLabel(null, false)).toBeNull();
+    expect(formatBranchLabel(null, true)).toBeNull();
   });
 });

@@ -9,6 +9,8 @@ import {
   resolveProjectDock,
 } from "../services/project-config.js";
 import { parseGitRemote } from "../services/git-remote.js";
+import { readGitBranch } from "../services/git-branch.js";
+import { getGitStatus } from "../services/git-status.js";
 import { getCachedAgents } from "../services/agent-detect.js";
 import { resolveGlobalPresets } from "./actions.js";
 import { attachSocketToSession } from "./terminal.js";
@@ -276,6 +278,46 @@ export async function internalRoutes(app: FastifyInstance) {
       const resolvedCwd = resolveWithinRoots(app, cwd);
       if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
       return parseGitRemote(resolvedCwd);
+    },
+  );
+
+  // Always-on branch label (issue #96) for a remote-hosted project — same
+  // "this reads *this* agent's own filesystem" reasoning as /internal/
+  // github-repo above, just backed by git-branch.ts's pure HEAD read instead
+  // of git-remote.ts's config parse. Unlike every other route in this file,
+  // the payload is a bare string (or null), not an object/array — Fastify
+  // only auto-JSON-encodes those; a returned string is sent as raw
+  // text/plain by default. Explicit content-type + JSON.stringify keeps this
+  // a well-formed `RemoteHostClient.request<T>()` response like every other
+  // /internal/* route (see remote-host-client.ts's resolveGitBranch, which
+  // expects to `res.json()` it straight into a `string | null`).
+  app.get<{ Querystring: { cwd?: string } }>(
+    "/internal/git-branch",
+    INTERNAL_RATE_LIMIT,
+    async (request, reply) => {
+      const { cwd } = request.query;
+      if (!cwd) return reply.badRequest("cwd query param is required");
+      const resolvedCwd = resolveWithinRoots(app, cwd);
+      if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
+      reply.type("application/json");
+      return JSON.stringify(readGitBranch(resolvedCwd));
+    },
+  );
+
+  // Fuller git status (issue #76) — branch/hash/ahead-behind/file-list — for
+  // a remote-hosted project's GitPanel and sidebar badge. Backed by
+  // git-status.ts's `git status --porcelain=v2 --branch` shell-out, which
+  // has to run on *this* agent's own filesystem for the same reason
+  // /internal/github-repo and /internal/git-branch do.
+  app.get<{ Querystring: { cwd?: string } }>(
+    "/internal/git-status",
+    INTERNAL_RATE_LIMIT,
+    async (request, reply) => {
+      const { cwd } = request.query;
+      if (!cwd) return reply.badRequest("cwd query param is required");
+      const resolvedCwd = resolveWithinRoots(app, cwd);
+      if (!resolvedCwd) return reply.badRequest("cwd must be within this agent's PROJECTS_ROOTS");
+      return getGitStatus(resolvedCwd);
     },
   );
 

@@ -61,7 +61,16 @@ vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof ChildProcess>();
   return {
     ...actual,
-    spawn: vi.fn((file: string, args: string[] = []) => {
+    spawn: vi.fn((file: string, args: string[] = [], options?: unknown) => {
+      // `git` (git-status.ts, issues #76/#96) is passed straight through to
+      // the real implementation rather than faked — unlike
+      // systemctl/systemd-run/agent-detect's shell probe below, this suite
+      // actually asserts on real git output (branch/isClean), and a real
+      // temp repo is cheap to spin up in these tests.
+      if (file === "git") {
+        return actual.spawn(file, args, options as ChildProcess.SpawnOptions);
+      }
+
       const ee = new EventEmitter() as EventEmitter & { stdout?: EventEmitter };
 
       // PtyManager.isMasterAlive: `systemctl --user is-active <unit>.scope`.
@@ -367,6 +376,92 @@ describe("internal routes (agent role, issue #26)", () => {
     const outside = await app.inject({
       method: "GET",
       url: `/internal/github-repo?cwd=${encodeURIComponent(outsideRoots)}`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(outside.statusCode).toBe(400);
+
+    fs.rmSync(outsideRoots, { recursive: true, force: true });
+    await app.close();
+  });
+
+  it("resolves the current branch from this host's own HEAD (issue #96)", async () => {
+    const app = await buildApp();
+    const cwd = path.join(projectsRoot, "git-repo");
+    fs.writeFileSync(path.join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n");
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/internal/git-branch?cwd=${encodeURIComponent(cwd)}`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toBe("main");
+    await app.close();
+  });
+
+  it("requires a cwd query param for git-branch, and rejects one outside PROJECTS_ROOTS", async () => {
+    const app = await buildApp();
+    const missing = await app.inject({
+      method: "GET",
+      url: "/internal/git-branch",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(missing.statusCode).toBe(400);
+
+    const outsideRoots = fs.mkdtempSync(path.join(os.tmpdir(), "internal-git-branch-outside-"));
+    const outside = await app.inject({
+      method: "GET",
+      url: `/internal/git-branch?cwd=${encodeURIComponent(outsideRoots)}`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(outside.statusCode).toBe(400);
+
+    fs.rmSync(outsideRoots, { recursive: true, force: true });
+    await app.close();
+  });
+
+  it("resolves git status from this host's own filesystem (issue #76)", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "internal-git-status-root-"));
+    const cwd = path.join(repoRoot, "real-repo");
+    fs.mkdirSync(cwd, { recursive: true });
+    execFileSync("git", ["init", "-b", "main"], { cwd, stdio: "pipe" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd, stdio: "pipe" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd, stdio: "pipe" });
+    fs.writeFileSync(path.join(cwd, "a.txt"), "a");
+    execFileSync("git", ["add", "-A"], { cwd, stdio: "pipe" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd, stdio: "pipe" });
+
+    const previousRoots = process.env.PROJECTS_ROOTS;
+    process.env.PROJECTS_ROOTS = repoRoot;
+
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "GET",
+      url: `/internal/git-status?cwd=${encodeURIComponent(cwd)}`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ branch: "main", isClean: true });
+
+    process.env.PROJECTS_ROOTS = previousRoots;
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    await app.close();
+  });
+
+  it("requires a cwd query param for git-status, and rejects one outside PROJECTS_ROOTS", async () => {
+    const app = await buildApp();
+    const missing = await app.inject({
+      method: "GET",
+      url: "/internal/git-status",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(missing.statusCode).toBe(400);
+
+    const outsideRoots = fs.mkdtempSync(path.join(os.tmpdir(), "internal-git-status-outside-"));
+    const outside = await app.inject({
+      method: "GET",
+      url: `/internal/git-status?cwd=${encodeURIComponent(outsideRoots)}`,
       headers: { authorization: `Bearer ${TOKEN}` },
     });
     expect(outside.statusCode).toBe(400);
