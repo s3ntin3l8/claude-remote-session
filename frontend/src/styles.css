@@ -1013,9 +1013,8 @@ body {
    selector's specificity (0,1,0), not just live somewhere in the cascade.
    Only background/border surfaces are remapped to the active terminal
    scheme's background (--tessera-chrome-bg, set in App.tsx); tab text-color
-   vars are left as dockview's own light/dark defaults (issue #132).
-
-   .dockview-theme-abyss is included alongside light/dark for a non-obvious
+   vars are left as dockview's own light/dark defaults (issue #132). */
+/* .dockview-theme-abyss is included alongside light/dark for a non-obvious
    reason (#121): floating ("peek") groups don't render inside the
    .dockview-theme-light/-dark element this app classes onto <DockviewReact>'s
    root — dockview mounts them in its own internal shell element
@@ -1026,11 +1025,13 @@ body {
    a light theme — not just the border/shadow. Repeating the same remap under
    .dockview-theme-abyss reaches that shell too. (Passing an explicit `theme`
    prop to <DockviewReact> would be the more principled fix, but is a bigger,
-   riskier change than this bug-fix PR's scope — see issue #121.)
-   var(--border) already resolves per-theme (light vs. dark root class), so
-   one rule covers both. --dv-floating-group-border exists but dockview's
-   base theme — the one this app uses — never applies it to anything, only
-   its "-spaced" theme variants do; setting it here would be a no-op. */
+   riskier change than this bug-fix PR's scope — see issue #121.) */
+/* --dv-floating-border/--dv-floating-box-shadow: var(--border) already
+   resolves per-theme (light vs. dark root class), so one rule covers all
+   three theme classes above. --dv-floating-group-border exists but
+   dockview's base theme — the one this app uses — never applies it to
+   anything, only its "-spaced" theme variants do; setting it here would be
+   a no-op. */
 .dockview-container .dockview-theme-light,
 .dockview-container .dockview-theme-dark,
 .dockview-container .dockview-theme-abyss {
