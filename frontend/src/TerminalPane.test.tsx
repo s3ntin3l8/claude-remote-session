@@ -4,6 +4,7 @@ import { render, waitFor, fireEvent } from "@testing-library/react";
 import { act } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import type { Theme } from "./store.js";
 import { useDashboardStore } from "./store.js";
 import { TerminalPane } from "./TerminalPane.js";
@@ -127,7 +128,20 @@ vi.mock("@xterm/addon-fit", () => ({
 }));
 vi.mock("@xterm/addon-webgl", () => ({
   WebglAddon: vi.fn(function () {
-    return { clearTextureAtlas: vi.fn() };
+    // `onContextLoss` mimics xterm's IEvent subscribe API: it captures the
+    // handler (rather than actually firing on real GPU context loss, which
+    // jsdom has no concept of) so a test can invoke it directly via
+    // `__fireContextLoss`, and returns a disposable like the real addon does.
+    let contextLossHandler: (() => void) | undefined;
+    return {
+      clearTextureAtlas: vi.fn(),
+      dispose: vi.fn(),
+      onContextLoss: vi.fn((handler: () => void) => {
+        contextLossHandler = handler;
+        return { dispose: vi.fn() };
+      }),
+      __fireContextLoss: () => contextLossHandler?.(),
+    };
   }),
 }));
 vi.mock("@xterm/addon-unicode11", () => ({ Unicode11Addon: vi.fn() }));
@@ -189,6 +203,18 @@ function getLatestTermInstance() {
 function getLatestFitAddonInstance() {
   const results = (FitAddon as unknown as ReturnType<typeof vi.fn>).mock.results;
   return results[results.length - 1]!.value as { fit: ReturnType<typeof vi.fn> };
+}
+
+// Same pattern as getLatestTermInstance/getLatestFitAddonInstance above, for
+// the mocked WebglAddon (see the @xterm/addon-webgl mock) — used to trigger
+// the context-loss handler TerminalPane subscribes to.
+function getLatestWebglAddonInstance() {
+  const results = (WebglAddon as unknown as ReturnType<typeof vi.fn>).mock.results;
+  return results[results.length - 1]!.value as {
+    clearTextureAtlas: ReturnType<typeof vi.fn>;
+    dispose: ReturnType<typeof vi.fn>;
+    __fireContextLoss: () => void;
+  };
 }
 
 beforeEach(() => {
@@ -270,6 +296,60 @@ describe("TerminalPane repaint registry (issue #107)", () => {
     unmount();
 
     expect(unregisterTerminalRepaint).toHaveBeenCalledExactlyOnceWith(1);
+  });
+});
+
+describe("TerminalPane WebGL context-loss fallback (issue #107)", () => {
+  // These tests prove the handler is wired and the disposed addon's ref is
+  // released — they can't prove a *real* lost GPU context actually recovers
+  // (jsdom has no WebGL), which is why the plan for this change calls for a
+  // live DevTools verification (WEBGL_lose_context) on top of these.
+  it("disposes the WebGL addon and repaints via the DOM renderer on context loss", () => {
+    stubFakeWebSocket(true);
+    renderPane();
+
+    const webglAddon = getLatestWebglAddonInstance();
+    const term = getLatestTermInstance() as unknown as { refresh: ReturnType<typeof vi.fn> };
+    term.refresh.mockClear();
+
+    webglAddon.__fireContextLoss();
+
+    expect(webglAddon.dispose).toHaveBeenCalledTimes(1);
+    expect(term.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops touching the disposed addon afterwards — repaint() falls through to term.refresh alone", () => {
+    stubFakeWebSocket(true);
+    renderPane();
+
+    const webglAddon = getLatestWebglAddonInstance();
+    webglAddon.__fireContextLoss();
+    webglAddon.clearTextureAtlas.mockClear();
+
+    const [, repaint] = vi.mocked(registerTerminalRepaint).mock.calls[0]!;
+    const term = getLatestTermInstance() as unknown as { refresh: ReturnType<typeof vi.fn> };
+    term.refresh.mockClear();
+
+    repaint();
+
+    expect(webglAddon.clearTextureAtlas).not.toHaveBeenCalled();
+    expect(term.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a second context-loss firing after the addon is already disposed", () => {
+    stubFakeWebSocket(true);
+    renderPane();
+
+    const webglAddon = getLatestWebglAddonInstance();
+    const term = getLatestTermInstance() as unknown as { refresh: ReturnType<typeof vi.fn> };
+    webglAddon.__fireContextLoss();
+    webglAddon.dispose.mockClear();
+    term.refresh.mockClear();
+
+    webglAddon.__fireContextLoss();
+
+    expect(webglAddon.dispose).not.toHaveBeenCalled();
+    expect(term.refresh).not.toHaveBeenCalled();
   });
 });
 

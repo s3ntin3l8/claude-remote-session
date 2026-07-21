@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
+import type { IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -7,7 +8,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { ImageIcon, RefreshIcon, SpinnerIcon, WifiOffIcon } from "./icons.js";
 import { useDashboardStore } from "./store.js";
-import { buildXtermTheme } from "./terminalTheme.js";
+import { buildXtermTheme, getSchemeBackground } from "./terminalTheme.js";
 import { api, type AppSettings } from "./api.js";
 import { registerTerminalRepaint, unregisterTerminalRepaint } from "./terminalRepaintRegistry.js";
 
@@ -259,10 +260,36 @@ export function TerminalPane(props: {
     // exactly that as part of applying `terminalSettings` to the live
     // instance, so a second copy of that logic here would just be redundant.
 
+    // Runtime GPU context loss (driver reset, backgrounded-tab context
+    // eviction, GPU hiccup) — as opposed to WebGL being unavailable at
+    // *creation* time, handled by the catch below. WebglAddon has no
+    // onContextRestored event, so there's no signal to retry on; a blind
+    // timer-retry could only loop. Instead: dispose the addon so xterm
+    // reverts to its default DOM renderer, null the ref so the repaint()
+    // closure and resize path's `webglAddonRef.current?.clearTextureAtlas()`
+    // calls below become harmless no-ops against a live DOM-rendered
+    // terminal, then force one full re-raster so the DOM renderer paints
+    // the current buffer immediately instead of leaving a frozen/blank
+    // screen until the next byte of PTY output arrives. Speculative
+    // hardening (issue #107 "Fix 2") — this path has never been observed
+    // to fire in practice; #107's actual symptoms traced to two other,
+    // already-fixed causes (#124, #129).
+    let webglContextLossSub: IDisposable | null = null;
     try {
       const webglAddon = new WebglAddon();
       term.loadAddon(webglAddon);
       webglAddonRef.current = webglAddon;
+      // Fall back to the DOM renderer on context loss — see comment above.
+      webglContextLossSub = webglAddon.onContextLoss(() => {
+        // Guards against a double-firing context-loss event (rare, but some
+        // GPU drivers can raise it more than once) re-disposing an
+        // already-disposed addon and double-repainting.
+        if (!webglAddonRef.current) return;
+        console.warn("[terminal] WebGL context lost — falling back to DOM renderer");
+        webglAddon.dispose();
+        webglAddonRef.current = null;
+        term.refresh(0, term.rows - 1);
+      });
     } catch (err) {
       // Not every environment has a usable WebGL context (e.g. some headless
       // or GPU-restricted setups) — xterm falls back to its default DOM
@@ -593,6 +620,7 @@ export function TerminalPane(props: {
       dataSub.dispose();
       titleSub.dispose();
       oscColorSubs.forEach((sub) => sub.dispose());
+      webglContextLossSub?.dispose();
       ws?.close();
       term.dispose();
       termRef.current = null;
@@ -735,6 +763,14 @@ export function TerminalPane(props: {
         style={{
           width: "100%",
           height: "100%",
+          // xterm's own canvas covers the terminal area itself, but not the
+          // padding ring around it — without an explicit background here,
+          // that ring (and the dockview chrome peeking through it) shows
+          // through as an unrelated color when it doesn't match the active
+          // scheme (issue #132). getSchemeBackground (not buildXtermTheme)
+          // since only the background is needed here, not a full 16-color
+          // xterm theme object.
+          background: getSchemeBackground(terminalSettings.colorScheme, theme),
           padding: `${terminalSettings.padding}px`,
           boxSizing: "border-box",
         }}
