@@ -363,6 +363,14 @@ export function App() {
   // mounted terminal through the same full repaint a resize would trigger.
   // One rAF (not immediate) so this runs after the new panel's own layout/
   // paint has settled, matching how the corruption is actually observed.
+  //
+  // Deliberately NOT gated on `panel` actually being a terminal: whether the
+  // corruption is caused by the new panel's own WebGL context or by dockview's
+  // new composited floating-group layer was never conclusively pinned down
+  // (see issue #107) — a non-terminal panel (GitHub/browser) could still be
+  // the compositing-layer case. Repainting on every panel add is the safe,
+  // mechanism-agnostic choice; the extra repaint work when it turns out to be
+  // unnecessary is cheap (a texture-atlas clear + a row refresh per terminal).
   useEffect(() => {
     if (!dockviewApi) return;
     const disposable = dockviewApi.onDidAddPanel((panel) => {

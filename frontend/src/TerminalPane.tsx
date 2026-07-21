@@ -627,7 +627,11 @@ export function TerminalPane(props: {
 
     // The WebGL renderer caches glyphs (size and color both) in a texture
     // atlas; reassigning these options alone leaves already-rendered glyphs
-    // showing their old font/size/color until the atlas is rebuilt.
+    // showing their old font/size/color until the atlas is rebuilt. Cleared
+    // immediately (not deferred to `repaintRef.current()` below) so a
+    // color-only change (theme toggle, no font-load wait involved) doesn't
+    // sit stale until that later call fires — `repaint()` clearing it again
+    // afterward is a harmless no-op double-clear, not a correctness issue.
     webglAddonRef.current?.clearTextureAtlas();
 
     // fontSize/fontFamily changes affect cell measurement, so the terminal

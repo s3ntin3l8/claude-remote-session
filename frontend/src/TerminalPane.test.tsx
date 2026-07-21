@@ -8,11 +8,18 @@ import { useDashboardStore } from "./store.js";
 import { TerminalPane } from "./TerminalPane.js";
 import { api } from "./api.js";
 import type * as ApiModule from "./api.js";
+import { registerTerminalRepaint, unregisterTerminalRepaint } from "./terminalRepaintRegistry.js";
 
 vi.mock("./api.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ApiModule>();
   return { ...actual, api: { ...actual.api, uploadSessionImage: vi.fn() } };
 });
+
+vi.mock("./terminalRepaintRegistry.js", () => ({
+  registerTerminalRepaint: vi.fn(),
+  unregisterTerminalRepaint: vi.fn(),
+  repaintAllTerminals: vi.fn(),
+}));
 
 interface FakeSocket {
   readyState: number;
@@ -162,6 +169,8 @@ beforeEach(() => {
     }),
   );
   vi.mocked(api.uploadSessionImage).mockReset();
+  vi.mocked(registerTerminalRepaint).mockClear();
+  vi.mocked(unregisterTerminalRepaint).mockClear();
 });
 
 afterEach(() => {
@@ -213,6 +222,23 @@ function renderPane() {
   });
   return render(<TerminalPane params={{ sessionId: 1 }} />);
 }
+
+describe("TerminalPane repaint registry (issue #107)", () => {
+  it("registers this session's repaint on mount and unregisters it on unmount", () => {
+    stubFakeWebSocket(true);
+    const { unmount } = renderPane();
+
+    expect(registerTerminalRepaint).toHaveBeenCalledTimes(1);
+    const [sessionId, repaint] = vi.mocked(registerTerminalRepaint).mock.calls[0]!;
+    expect(sessionId).toBe(1);
+    expect(repaint).toBeInstanceOf(Function);
+    expect(unregisterTerminalRepaint).not.toHaveBeenCalled();
+
+    unmount();
+
+    expect(unregisterTerminalRepaint).toHaveBeenCalledExactlyOnceWith(1);
+  });
+});
 
 describe("TerminalPane OSC push", () => {
   it("sends OSC 10/11 bytes on theme toggle when socket is OPEN", async () => {
