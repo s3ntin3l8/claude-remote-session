@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { IDockviewPanelHeaderProps } from "dockview-react";
 import type { TerminalPaneParams } from "./TerminalPane.js";
@@ -20,7 +20,11 @@ const KILL_ARM_SECONDS = KILL_ARM_MS / 1000;
 // longer fits alongside the dot, name, and the two action buttons, and would
 // spill into the neighboring tab (.pane-tab has no overflow:hidden — see
 // issue #103). The status dot alone still conveys the same state, so hiding
-// the badge here loses little.
+// the badge here loses little. Calibrated against the widest badge,
+// "Attention" (~90px of content width): at 190px total, the fixed-width
+// items (dot + gaps + two buttons, ~87px) leave ~13px for the name once the
+// badge is showing — comfortably above the badge's own width, so it's the
+// badge that gives way first, not the name.
 const NARROW_TAB_BADGE_THRESHOLD_PX = 190;
 
 export function PaneTab(props: IDockviewPanelHeaderProps<TerminalPaneParams>) {
@@ -72,6 +76,22 @@ export function PaneTab(props: IDockviewPanelHeaderProps<TerminalPaneParams>) {
     });
     observer.observe(el);
     return () => observer.disconnect();
+  }, []);
+
+  // The callback-ref form (rather than plain useRef + a mount effect) runs
+  // during React's commit phase, before the browser paints — measuring here
+  // and calling setNarrow synchronously avoids a one-frame flash of the badge
+  // on tabs that mount already narrower than the threshold. The ResizeObserver
+  // above still owns every resize after mount. Wrapped in useCallback (rather
+  // than a plain inline function) so React doesn't treat it as a new ref on
+  // every re-render — session status updates re-render this component
+  // frequently, and an unmemoized ref callback would detach/reattach (and
+  // re-measure) on each one.
+  const setTabRef = useCallback((el: HTMLDivElement | null) => {
+    tabRef.current = el;
+    if (el && el.getBoundingClientRect().width < NARROW_TAB_BADGE_THRESHOLD_PX) {
+      setNarrow(true);
+    }
   }, []);
 
   useEffect(
@@ -165,7 +185,7 @@ export function PaneTab(props: IDockviewPanelHeaderProps<TerminalPaneParams>) {
   }
 
   return (
-    <div ref={tabRef} className={`pane-tab${ringClass}`}>
+    <div ref={setTabRef} className={`pane-tab${ringClass}`}>
       {dot}
       {renaming ? (
         <input
