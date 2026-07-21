@@ -4,6 +4,7 @@ import type { IDockviewPanelHeaderProps } from "dockview-react";
 import type { TerminalPaneParams } from "./TerminalPane.js";
 import { useDashboardStore } from "./store.js";
 import { resolveAgentLogo } from "./cliLogos.js";
+import { formatBranchLabel } from "./paneTitle.js";
 import { CloseIcon, KillIcon, MoveIcon, OverflowIcon, RenameIcon } from "./icons.js";
 
 // The one distinction the design's States doc (section 1) stresses above
@@ -36,6 +37,19 @@ export function PaneTab(props: IDockviewPanelHeaderProps<TerminalPaneParams>) {
   const theme = useDashboardStore((s) => s.theme);
   const agentLogo = session ? resolveAgentLogo(session.command, theme) : null;
   const confirmBeforeKill = useDashboardStore((s) => s.settings.sessions.confirmBeforeKill);
+  // Branch sub-label (issue #96) — the project's always-on currentBranch
+  // (rides along on GET /api/projects, see api.ts's Project type) plus a
+  // dirty ("*") marker sourced from the separately-polled gitStatuses map
+  // (issue #76's fuller `git status`). A worktree session's own cwd (issue
+  // #100) naturally resolves to its own branch here with no special-casing
+  // — this just reads whatever the project's currentBranch/gitStatus say.
+  const project = useDashboardStore((s) =>
+    session ? s.projects.find((p) => p.id === session.projectId) : undefined,
+  );
+  const gitStatus = useDashboardStore((s) => (session ? s.gitStatuses[session.projectId] : null));
+  const branchLabel = project
+    ? formatBranchLabel(project.currentBranch, gitStatus ? !gitStatus.isClean : false)
+    : null;
 
   const [renaming, setRenaming] = useState(false);
   const [draftName, setDraftName] = useState(props.api.title ?? "");
@@ -216,6 +230,7 @@ export function PaneTab(props: IDockviewPanelHeaderProps<TerminalPaneParams>) {
           {props.api.title}
         </span>
       )}
+      {!narrow && branchLabel && <span className="pane-tab-branch">{branchLabel}</span>}
       {!narrow && badge}
       <button
         className="pane-tab-btn"

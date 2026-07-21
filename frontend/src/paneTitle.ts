@@ -30,3 +30,13 @@ export function initialPaneTitle(session: Session, projectName: string | undefin
   if (session.lastTitle) return formatPaneTitle(session.lastTitle, projectName);
   return session.name || session.command;
 }
+
+// The pane-tab/sidebar branch sub-label (issue #96) — "main" or "main *"
+// once a project's git status is known to be dirty, matching the
+// `git status`/prompt convention of a trailing `*` for uncommitted changes.
+// `null` (no branch known — not a repo, or not fetched yet) renders nothing,
+// so callers should skip the sub-label entirely rather than showing this.
+export function formatBranchLabel(branch: string | null, isDirty: boolean): string | null {
+  if (!branch) return null;
+  return isDirty ? `${branch} *` : branch;
+}

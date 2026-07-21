@@ -773,6 +773,32 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Per-project git dirty badge (issue #76) — a small colored dot next to the
+   project name, same "dot" language as .github-panel-ci-dot's good/bad/
+   pending. `none` (not a repo, not fetched yet, or an unreachable remote
+   host) is deliberately subtle — var(--dim) at low opacity — so it reads as
+   "nothing to report" rather than competing with the clean/dirty/conflict
+   states for attention. */
+.project-git-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--dim);
+  opacity: 0.4;
+}
+.project-git-dot.clean {
+  background: var(--g);
+  opacity: 1;
+}
+.project-git-dot.dirty {
+  background: var(--o);
+  opacity: 1;
+}
+.project-git-dot.conflict {
+  background: var(--r);
+  opacity: 1;
+}
 .project-host-badge {
   display: inline-flex;
   align-items: center;
@@ -1340,6 +1366,17 @@ body {
   text-overflow: ellipsis;
   flex: 1;
   min-width: 0;
+}
+/* Branch sub-label (issue #96) — inline after the name rather than a second
+   line, so the tab strip's fixed row height (.pane-tab) doesn't need to
+   change; hidden under the same narrow-tab threshold as the status badge
+   (see PaneTab.tsx's NARROW_TAB_BADGE_THRESHOLD_PX). */
+.pane-tab-branch {
+  font-size: 10.5px;
+  color: var(--dim);
+  font-family: "Geist Mono", monospace;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .pane-tab-rename-input {
   flex: 1;
@@ -2078,6 +2115,11 @@ body {
 }
 .github-panel-ci-dot.pending {
   background: var(--o);
+}
+/* GitPanel.tsx's conflict callout (issue #76) — reuses the same panel
+   shell/spacing as everything above, just a distinct warning color. */
+.github-panel-conflicts {
+  color: var(--r);
 }
 
 /* Browser preview panel (BrowserPanel.tsx, issue #28) — a dockview panel

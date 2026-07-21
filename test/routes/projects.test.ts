@@ -43,6 +43,9 @@ describe("projects route", () => {
     // Always present, even with no dock session to detect from — see the
     // "detectedDevServerPort" describe block below for the detection cases.
     expect(listed.json()[0].detectedDevServerPort).toBeNull();
+    // /home/bjoern isn't a git repo in the test sandbox — see the
+    // "currentBranch" describe block below for the git-repo case.
+    expect(listed.json()[0].currentBranch).toBeNull();
 
     await app.close();
   });
@@ -556,6 +559,130 @@ describe("projects route", () => {
         url: `/api/projects/${project.json().id}/github`,
       });
       expect(res.statusCode).toBe(503);
+
+      await app.close();
+    });
+  });
+
+  describe("GET /api/projects/:id/git-status (issue #76)", () => {
+    it("404s for an unknown project", async () => {
+      const app = await buildApp();
+      const res = await app.inject({ method: "GET", url: "/api/projects/999999/git-status" });
+      expect(res.statusCode).toBe(404);
+      await app.close();
+    });
+
+    it("204s for a local project that isn't a git repo", async () => {
+      const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "projects-git-status-none-"));
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "not-a-repo", cwd: projectCwd },
+      });
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/projects/${created.json().id}/git-status`,
+      });
+      expect(res.statusCode).toBe(204);
+
+      fs.rmSync(projectCwd, { recursive: true, force: true });
+      await app.close();
+    });
+
+    it("returns branch/hash/isClean for a real local git repo", async () => {
+      const { execFileSync } = await import("node:child_process");
+      const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "projects-git-status-real-"));
+      execFileSync("git", ["init", "-b", "main"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["config", "user.email", "test@example.com"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: projectCwd, stdio: "pipe" });
+      fs.writeFileSync(path.join(projectCwd, "a.txt"), "a");
+      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["commit", "-m", "initial"], { cwd: projectCwd, stdio: "pipe" });
+
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "real-repo", cwd: projectCwd },
+      });
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/projects/${created.json().id}/git-status`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ branch: "main", isClean: true, hasConflicts: false });
+
+      fs.rmSync(projectCwd, { recursive: true, force: true });
+      await app.close();
+    });
+
+    it("503s for a project on an unreachable remote host", async () => {
+      const app = await buildApp();
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "git-status-remote-host", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-git-status", cwd: "/x", hostId: host.json().id },
+      });
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/projects/${project.json().id}/git-status`,
+      });
+      expect(res.statusCode).toBe(503);
+
+      await app.close();
+    });
+  });
+
+  describe("currentBranch (issue #96)", () => {
+    it("is the branch name for a local git repo", async () => {
+      const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "projects-current-branch-"));
+      fs.mkdirSync(path.join(projectCwd, ".git"));
+      fs.writeFileSync(path.join(projectCwd, ".git", "HEAD"), "ref: refs/heads/feature/foo\n");
+
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "branchy", cwd: projectCwd },
+      });
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects" });
+      const project = listed.json().find((p: { id: number }) => p.id === created.json().id);
+      expect(project.currentBranch).toBe("feature/foo");
+
+      fs.rmSync(projectCwd, { recursive: true, force: true });
+      await app.close();
+    });
+
+    it("is null for a project on an unreachable remote host, without failing the whole list", async () => {
+      const app = await buildApp();
+      const host = await app.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: { name: "branch-remote-host", baseUrl: "http://127.0.0.1:1", token: "t" },
+      });
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-branch", cwd: "/x", hostId: host.json().id },
+      });
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects" });
+      expect(listed.statusCode).toBe(200);
+      const project = listed.json().find((p: { id: number }) => p.id === created.json().id);
+      expect(project.currentBranch).toBeNull();
 
       await app.close();
     });

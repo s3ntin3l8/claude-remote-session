@@ -4,6 +4,7 @@ import type { DiscoveredCandidate, Launcher, DockControl } from "./project-confi
 import type { SessionInfo } from "./pty-manager.js";
 import type { DetectedAgent } from "./agent-detect.js";
 import type { GitHubRepoRef } from "./git-remote.js";
+import type { GitStatus } from "./git-status.js";
 import { getHostRow, decryptToken } from "./host-registry.js";
 
 // One HTTP+WS client per remote "agent" host (issue #26), talking to its
@@ -155,6 +156,14 @@ export class RemoteHostClient {
 
   resolveGitHubRepo(cwd: string): Promise<GitHubRepoRef | null> {
     return this.request(`/internal/github-repo?cwd=${encodeURIComponent(cwd)}`);
+  }
+
+  resolveGitBranch(cwd: string): Promise<string | null> {
+    return this.request(`/internal/git-branch?cwd=${encodeURIComponent(cwd)}`);
+  }
+
+  resolveGitStatus(cwd: string): Promise<GitStatus | null> {
+    return this.request(`/internal/git-status?cwd=${encodeURIComponent(cwd)}`);
   }
 
   async spawn(opts: SpawnSessionOptions): Promise<void> {

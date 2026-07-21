@@ -33,6 +33,7 @@ const PROJECT: Project = {
   hostId: "local",
   devServerUrl: null,
   detectedDevServerPort: null,
+  currentBranch: null,
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
@@ -43,6 +44,7 @@ const PROJECT_2: Project = {
   hostId: "local",
   devServerUrl: null,
   detectedDevServerPort: null,
+  currentBranch: null,
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
