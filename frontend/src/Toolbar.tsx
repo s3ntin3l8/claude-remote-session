@@ -10,12 +10,13 @@ import {
 } from "./icons.js";
 import { NotificationBell } from "./NotificationBell.js";
 import type { Session } from "./api.js";
+import type { SettingsSection } from "./Settings.js";
 
 interface ToolbarProps {
   onToggleSidebar: () => void;
   onOpenSession: (session: Session) => void;
   onOpenLauncher: () => void;
-  onOpenSettings: (section?: string) => void;
+  onOpenSettings: (section?: SettingsSection) => void;
   activeWorkspaceName: string | null;
   paneCount: number;
   currentVersion: string | null;
