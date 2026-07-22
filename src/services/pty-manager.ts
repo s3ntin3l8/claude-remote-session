@@ -476,6 +476,11 @@ export class Session {
       // `this`, not the pty instance), mis-resizing an unrelated process
       // incarnation. See cancelPendingNudge()'s own doc comment.
       this.cancelPendingNudge();
+      // Same reasoning as detectCarry's clear in kill() below — a client can
+      // also die on its own (crash, not an explicit kill()), and this exit
+      // handler is the only place that path passes through before a later
+      // respawn's first chunk arrives.
+      this.detectCarry = "";
       for (const listener of this.exitListeners) listener();
     });
 
@@ -679,6 +684,13 @@ export class Session {
     this.cancelPendingNudge();
     this.ptyProcess?.kill();
     this.ptyProcess = null;
+    // Unlike inAltScreen/mouseTracking (which deliberately persist across a
+    // respawn — they track true, ongoing screen/mouse state), detectCarry is
+    // just a byte-stream artifact of wherever the old attach-client's last
+    // chunk happened to end. It carries no meaning once that stream is gone,
+    // so clear it rather than risk it being misread as a prefix of the new
+    // attach-client's first chunk.
+    this.detectCarry = "";
   }
 
   toInfo(idleThresholdMs: number = IDLE_THRESHOLD_MS): SessionInfo {
