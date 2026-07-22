@@ -81,9 +81,32 @@ These decisions apply across multiple phases and are established here to avoid r
 
 ---
 
+## Phase 2.5: Task Master — Thin Slice
+
+**Goal:** Prove the core task→agent→review→PR loop end-to-end, behind the same flag as the full Task Master, before investing in Browser/Socket/Subagents. Pulled forward from Phase 6 specifically to de-risk the rest of the roadmap: if the loop doesn't feel right, better to learn that now than after three more phases.
+
+**Gate:** `MULLION_TASK_MASTER_ENABLED=false` (default off) — the same flag Phase 6 uses. Turning it on gets you this slice; Phase 6 hardens it further behind the same switch, no new flag needed.
+
+### Features
+
+| #     | Feature                                                                                                                                                        | Effort | Depends On |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------- |
+| 2.5.1 | Task watcher (minimal) — background poller for issues with the task label (default `mullion-task`); every task requires manual claim, no auto-claim branch yet | S      | —          |
+| 2.5.2 | Agent spawner (minimal) — creates a session with the issue title + body as the initial prompt, tagged with the source issue for cross-reference                | S/M    | 2.5.1      |
+| 2.5.3 | Manual claim (minimal) — a claim action wired into existing UI (sidebar/dock), not a new dockview panel; invokes 2.5.2's spawner directly                      | S      | 2.5.2      |
+| 2.5.4 | Review & manual PR — no new code: review the agent's work in the existing session/git/GitHub panels, open the PR by hand                                       | XS     | 2.5.3      |
+
+### Design Notes
+
+- Deliberately excludes the machinery Phase 6 adds later: no task state machine or `/api/tasks` REST surface (6.2), no GitHub label/comment sync automation (6.4), no dedicated Tasks panel (6.5), no automated Task → PR promotion (6.7). Those remain in Phase 6 as the hardening pass once the slice has validated the concept.
+- Does **not** depend on Phase 2's review gate (2.7) or hook socket (2.1) — task-prompt injection here is a plain environment variable at spawn time, same mechanism the roadmap already uses elsewhere before hooks exist. This is what makes pulling it forward possible: it only needs Phase 1/2 to be _stable_, not for 2.7 specifically to have shipped.
+- Issues #214, #216, #219 (previously Phase 6's 6.1/6.3/6.6) are retargeted into this slice as 2.5.1/2.5.2/2.5.3, moved to this milestone, and trimmed of their Phase-6-only dependencies (state machine, hook socket, Tasks panel). The 6.1/6.3/6.6 numbers are retired in Phase 6; the corresponding hardening work is folded into 6.2 (state machine formalizes 2.5.1's polling) and 6.5 (Tasks panel replaces 2.5.3's ad hoc claim UI).
+
+---
+
 ## Phase 3: Controllable Browser
 
-**Goal:** An in-app browser pane that agents can script — navigate, snapshot the DOM, click elements, fill forms, evaluate JavaScript — alongside terminal panes in the dockview layout.
+**Goal:** An in-app browser pane that agents can script — navigate, snapshot the DOM, click elements, fill forms, evaluate JavaScript — alongside terminal panes in the dockview layout. **Primary motivation:** let agents verify their own work (load a page, click through a flow, confirm a UI change) against a browser Mullion controls, instead of depending on the user's local machine and its browser to do that verification.
 
 ### Features
 
@@ -157,26 +180,26 @@ These decisions apply across multiple phases and are established here to avoid r
 
 ---
 
-## Phase 6: Task Master
+## Phase 6: Task Master — Full
 
-**Goal:** Turn GitHub issues into autonomous agent jobs. Mullion watches for issues with a task label, spawns agents with the issue context, tracks progress via hooks, and presents results for review — closing the loop from task definition to merge-ready PR.
+**Goal:** Harden the Phase 2.5 thin slice into the full autonomous loop: a real task state machine, GitHub issue state sync, a dedicated Tasks panel, and automated Task → PR promotion. Phase 2.5 proves the concept works; Phase 6 makes it production-grade and auto-claimable.
 
 **Gate:** `MULLION_TASK_MASTER_ENABLED=false` (default off). When disabled, the task watcher is inert and no dashboard UI changes appear.
 
 ### Features
 
-| #   | Feature                                                                                                                                                                  | Effort | Depends On                    |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ----------------------------- |
-| 6.1 | Task watcher service — background poller for issues with configurable task label (default `mullion-task`)                                                                | M      | GitHub integration (existing) |
-| 6.2 | Task state machine + REST API — `GET /api/tasks`, `GET /api/tasks/:id`, `POST /api/tasks/:id/claim`; states: Pending → Claimed → In Progress → Reviewing → Done / Failed | M      | 6.1                           |
-| 6.3 | Agent spawner — creates a terminal session with issue title + body injected as the initial prompt; session tracks back to the task                                       | M      | 6.2, 2.1 (hook socket)        |
-| 6.4 | GitHub issue state sync — auto-update labels (`mullion-claimed`, `mullion-done`), add progress comments, assign task to the agent's identity                             | S      | 6.1                           |
-| 6.5 | Tasks panel (frontend) — dockview panel listing tasks across all projects, grouped by status; each row shows title, status badge, linked session, agent name             | L      | 6.2                           |
-| 6.6 | Manual claim — "Claim" button on pending tasks; spawns agent on demand (for tasks with `Manual: true` in body)                                                           | S      | 6.5, 6.3                      |
-| 6.7 | Task → PR promotion — on user approval, create a PR from the agent's branch, add `mullion-done` label, close the issue; on rejection, return to In Progress              | M      | 6.2, 2.7 (review gate)        |
+| #   | Feature                                                                                                                                                                  | Effort | Depends On                                 |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ------------------------------------------ |
+| 6.2 | Task state machine + REST API — `GET /api/tasks`, `GET /api/tasks/:id`, `POST /api/tasks/:id/claim`; states: Pending → Claimed → In Progress → Reviewing → Done / Failed | M      | 2.5.1 (thin-slice watcher, being replaced) |
+| 6.4 | GitHub issue state sync — auto-update labels (`mullion-claimed`, `mullion-done`), add progress comments, assign task to the agent's identity                             | S      | 2.5.1                                      |
+| 6.5 | Tasks panel (frontend) — dockview panel listing tasks across all projects, grouped by status; each row shows title, status badge, linked session, agent name             | L      | 6.2                                        |
+| 6.7 | Task → PR promotion — on user approval, create a PR from the agent's branch, add `mullion-done` label, close the issue; on rejection, return to In Progress              | M      | 6.2, 2.7 (review gate)                     |
+
+_(6.1, 6.3, 6.6 retired — hardened into 2.5.1/2.5.2/2.5.3 and pulled forward into Phase 2.5.)_
 
 ### Design Notes
 
+- Builds on Phase 2.5 (Thin Slice) rather than starting from scratch: the watcher, spawner, and claim mechanism already exist in minimal form (2.5.1/2.5.2/2.5.3). Phase 6 no longer has its own 6.1/6.3/6.6 — that hardening work is folded into 6.2 (state machine, formalizing the watcher) and 6.5 (Tasks panel, replacing the ad hoc claim UI).
 - Tasks are **GitHub issues as the source of truth** — the issue is the authoritative record. Mullion's task state is a cache derived from the issue label + body fields.
 - Task context injection: issue title becomes the instruction, body becomes the spec/context. Passed as initial prompt via `MULLION_HOOK_SOCKET` (Phase 2) or environment variable at session spawn.
 - The `Manual: true` field in the issue body bypasses auto-claim — the task sits in Pending until a user clicks "Claim" in the dashboard.
@@ -207,16 +230,19 @@ Phase 1 (Notifications)
   ├── 1.8 (Kanban) — session state transitions from event model
   ├── Phase 2 (Hooks) — uses notification event model for hook message delivery
   │     ├── 2.8 (Timeline) — draws from file changes (2.6) + review gates (2.7)
+  │     ├── Phase 2.5 (Task Master — Thin Slice) — needs Phase 1/2 stable, NOT the hook
+  │     │     socket or review gate specifically (spawn-time env var, not hooks)
+  │     │     └── Phase 6 (Task Master — Full) — hardens the thin slice: state machine,
+  │     │           GitHub sync, Tasks panel, automated promotion (needs review gate 2.7)
   │     ├── Phase 3 (Browser) — hook system triggers browser actions
   │     ├── Phase 4 (Socket API) — notification events streamed over socket
-  │     ├── Phase 5 (Subagents) — hook system provides fork/join signals
-  │     └── Phase 6 (Task Master) — hook socket injects task context; review gate (2.7)
-  │                                          approves task output
+  │     └── Phase 5 (Subagents) — hook system provides fork/join signals
   └── Phase 4 (Socket API) — notification events streamed over socket
         ├── 4.7 (History) — persistent event storage, CLI queryable
         └── Phase 5 (Subagents) — subagent events streamed over socket
 
-Phase 6 (Task Master) requires: GitHub integration + Phase 1 + Phase 2 + 2.7 (review gate)
+Phase 2.5 (Thin Slice) requires: GitHub integration + Phase 1 + Phase 2 (stable, not specific features)
+Phase 6 (Full) requires: Phase 2.5 (Thin Slice) + 2.7 (review gate)
 Phase 6 benefits from but does NOT require: Phase 3 (Browser), Phase 5 (Subagents) — see Sequencing Rationale
 ```
 
@@ -238,11 +264,19 @@ Hooks second because:
 2. They unlock the review gate (the core of the vision)
 3. They're additive to the existing PTY-parsed channel — no regression risk
 
+Task Master (Thin Slice) pulled forward to right after Hooks because:
+
+1. It's the payoff the whole roadmap is building toward — proving it early, cheaply, validates every phase that follows before they're built
+2. It only needs Phase 1/2 to be _stable_, not any specific Phase 2 feature (no hook socket, no review gate) — so it doesn't actually wait on anything Browser/Socket/Subagents would otherwise gate it behind
+3. It ships behind the same flag as the full Task Master (Phase 6), so it's a no-regression, opt-in addition
+4. If the core loop doesn't feel right, that's cheap to learn now and expensive to learn after three more phases of infrastructure investment
+
 Browser third because:
 
-1. It's the largest-scope phase and benefits most from having hooks in place
-2. The hook system lets agents trigger browser actions without code changes
-3. The frame-streaming infrastructure is independent of the notification model
+1. Agents need to verify their own work — load a page, click through a flow, confirm a UI change — against a browser Mullion controls, not the user's local machine's browser; this is what actually closes the verification gap in the agent loop
+2. It's the largest-scope phase and benefits most from having hooks in place
+3. The hook system lets agents trigger browser actions without code changes
+4. The frame-streaming infrastructure is independent of the notification model
 
 Socket API fourth because:
 
@@ -256,11 +290,12 @@ Subagents last because:
 2. It's the most speculative — process-tree polling may need tuning against real agent behavior
 3. The visualization decisions benefit from settled notification UI patterns (Phase 1)
 
-Task Master last because:
+Task Master (Full) last because:
 
-1. It integrates every preceding phase — it's the workflow that makes them useful together
-2. It depends on hooks (Phase 2) for agent progress reporting and the review gate (2.7) for approval
-3. It's gated by a flag, so it can ship as soon as Phase 2 is stable without waiting for Phases 3-5
+1. The core loop already shipped early as the Phase 2.5 Thin Slice — Phase 6 is the hardening pass (state machine, GitHub sync, dedicated panel, automated promotion), not the first proof of the concept
+2. It integrates every preceding phase — it's the workflow that makes them useful together
+3. It depends on hooks (Phase 2) for agent progress reporting and the review gate (2.7) for automated approval
+4. It's gated by the same flag as the Thin Slice, so it can ship as soon as it's ready without waiting for Phases 3-5
 
 ---
 
@@ -283,6 +318,17 @@ These open issues from before the roadmap was established map directly into spec
 | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
 | [#212](https://github.com/s3ntin3l8/mullion-session-manager/issues/212) — Session timeline (2.8) | Per-session detail panel fed by hook-sourced file changes and review gates. Complements the notification panel (1.4). | Milestone + `phase-2` assigned |
 
+### Phase 2.5 (Task Master — Thin Slice)
+
+Pulled forward from Phase 6 — see the Phase 2.5 section above and the Sequencing Rationale for why.
+
+| Issue                                                                                                                            | How it fits                                                                                   | Status                                       |
+| -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| [#214](https://github.com/s3ntin3l8/mullion-session-manager/issues/214) — 2.5.1: Task watcher service (minimal, thin slice)      | Retargeted from Phase 6's 6.1. Trimmed of the state-machine dependency for the thin slice.    | Retargeted, milestone + `phase-2.5` assigned |
+| [#216](https://github.com/s3ntin3l8/mullion-session-manager/issues/216) — 2.5.2: Agent spawner (minimal, thin slice)             | Retargeted from Phase 6's 6.3. Trimmed of the hook-socket dependency; uses a plain env var.   | Retargeted, milestone + `phase-2.5` assigned |
+| [#219](https://github.com/s3ntin3l8/mullion-session-manager/issues/219) — 2.5.3: Manual claim (minimal, thin slice)              | Retargeted from Phase 6's 6.6. Trimmed of the Tasks-panel dependency; wired into existing UI. | Retargeted, milestone + `phase-2.5` assigned |
+| [#224](https://github.com/s3ntin3l8/mullion-session-manager/issues/224) — 2.5.4: Review & manual PR via existing UI (thin slice) | New. No code — validates the loop using existing session/git/GitHub panels.                   | Milestone + `phase-2.5` assigned             |
+
 ### Phase 3
 
 | Issue                                                                                                           | How it fits                                                                                                                    | Status                         |
@@ -298,15 +344,14 @@ These open issues from before the roadmap was established map directly into spec
 
 ### Phase 6
 
-| Issue                                                                                                         | How it fits                                                                                                             | Status                         |
-| ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| [#214](https://github.com/s3ntin3l8/mullion-session-manager/issues/214) — Task watcher service (6.1)          | Background poller for `mullion-task` labeled issues. Creates task records.                                              | Milestone + `phase-6` assigned |
-| [#215](https://github.com/s3ntin3l8/mullion-session-manager/issues/215) — Task state machine + REST API (6.2) | Task lifecycle: Pending → Claimed → In Progress → Reviewing → Done/Failed. REST endpoints for claim/approve/reject.     | Milestone + `phase-6` assigned |
-| [#216](https://github.com/s3ntin3l8/mullion-session-manager/issues/216) — Agent spawner (6.3)                 | Creates session with issue title+body as prompt. Links session to task.                                                 | Milestone + `phase-6` assigned |
-| [#217](https://github.com/s3ntin3l8/mullion-session-manager/issues/217) — GitHub issue state sync (6.4)       | Updates labels, comments, assignee on the GitHub issue as task progresses.                                              | Milestone + `phase-6` assigned |
-| [#218](https://github.com/s3ntin3l8/mullion-session-manager/issues/218) — Tasks panel frontend (6.5)          | Dockview panel listing tasks grouped by status. Detail view with embedded timeline and action buttons.                  | Milestone + `phase-6` assigned |
-| [#219](https://github.com/s3ntin3l8/mullion-session-manager/issues/219) — Manual claim (6.6)                  | "Claim" button on pending tasks; spawns agent on demand for tasks with `Manual: true`.                                  | Milestone + `phase-6` assigned |
-| [#220](https://github.com/s3ntin3l8/mullion-session-manager/issues/220) — Task → PR promotion (6.7)           | On approval, create PR from agent's branch, close issue with `mullion-done` label. On rejection, return to In Progress. | Milestone + `phase-6` assigned |
+| Issue                                                                                                         | How it fits                                                                                                                                             | Status                         |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| [#215](https://github.com/s3ntin3l8/mullion-session-manager/issues/215) — Task state machine + REST API (6.2) | Task lifecycle: Pending → Claimed → In Progress → Reviewing → Done/Failed. REST endpoints for claim/approve/reject. Formalizes 2.5.1's minimal watcher. | Milestone + `phase-6` assigned |
+| [#217](https://github.com/s3ntin3l8/mullion-session-manager/issues/217) — GitHub issue state sync (6.4)       | Updates labels, comments, assignee on the GitHub issue as task progresses.                                                                              | Milestone + `phase-6` assigned |
+| [#218](https://github.com/s3ntin3l8/mullion-session-manager/issues/218) — Tasks panel frontend (6.5)          | Dockview panel listing tasks grouped by status. Detail view with embedded timeline and action buttons. Replaces 2.5.3's ad hoc claim UI.                | Milestone + `phase-6` assigned |
+| [#220](https://github.com/s3ntin3l8/mullion-session-manager/issues/220) — Task → PR promotion (6.7)           | On approval, create PR from agent's branch, close issue with `mullion-done` label. On rejection, return to In Progress. Automates 2.5.4's manual step.  | Milestone + `phase-6` assigned |
+
+_(6.1, 6.3, 6.6 — see #214/#216/#219, retargeted into Phase 2.5 above.)_
 
 ### Cross-Cutting / Standalone
 
