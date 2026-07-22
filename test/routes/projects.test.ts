@@ -4,6 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { buildApp } from "../../src/app.js";
 import { closeDb } from "../../src/db/client.js";
+import { gitEnv } from "../../src/services/git-env.js";
 
 function jsonResponse(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -619,15 +620,28 @@ describe("projects route", () => {
     it("returns git status for a real local git repo", async () => {
       const { execFileSync } = await import("node:child_process");
       const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "batch-git-status-real-"));
-      execFileSync("git", ["init", "-b", "main"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["init", "-b", "main"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       execFileSync("git", ["config", "user.email", "test@example.com"], {
         cwd: projectCwd,
         stdio: "pipe",
+        env: gitEnv(),
       });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "Test"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       fs.writeFileSync(path.join(projectCwd, "a.txt"), "a");
-      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe" });
-      execFileSync("git", ["commit", "-m", "initial"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe", env: gitEnv() });
+      execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
 
       const app = await buildApp();
       const created = await app.inject({
@@ -677,15 +691,28 @@ describe("projects route", () => {
     it("omits a project with a transient git failure from the response", async () => {
       const { execFileSync } = await import("node:child_process");
       const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "batch-git-status-transient-"));
-      execFileSync("git", ["init", "-b", "main"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["init", "-b", "main"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       execFileSync("git", ["config", "user.email", "test@example.com"], {
         cwd: projectCwd,
         stdio: "pipe",
+        env: gitEnv(),
       });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "Test"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       fs.writeFileSync(path.join(projectCwd, "a.txt"), "a");
-      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe" });
-      execFileSync("git", ["commit", "-m", "initial"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe", env: gitEnv() });
+      execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       // Break HEAD so `git status` fails while `.git` still exists.
       fs.unlinkSync(path.join(projectCwd, ".git", "HEAD"));
 
@@ -737,15 +764,24 @@ describe("projects route", () => {
     it("handles a mix of repo, non-repo, and transient-failure projects", async () => {
       const { execFileSync } = await import("node:child_process");
       const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "batch-mix-repo-"));
-      execFileSync("git", ["init", "-b", "main"], { cwd: repoDir, stdio: "pipe" });
+      execFileSync("git", ["init", "-b", "main"], { cwd: repoDir, stdio: "pipe", env: gitEnv() });
       execFileSync("git", ["config", "user.email", "test@example.com"], {
         cwd: repoDir,
         stdio: "pipe",
+        env: gitEnv(),
       });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "Test"], {
+        cwd: repoDir,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       fs.writeFileSync(path.join(repoDir, "a.txt"), "a");
-      execFileSync("git", ["add", "-A"], { cwd: repoDir, stdio: "pipe" });
-      execFileSync("git", ["commit", "-m", "initial"], { cwd: repoDir, stdio: "pipe" });
+      execFileSync("git", ["add", "-A"], { cwd: repoDir, stdio: "pipe", env: gitEnv() });
+      execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+        cwd: repoDir,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
 
       const nonRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), "batch-mix-nonrepo-"));
 
@@ -808,15 +844,28 @@ describe("projects route", () => {
     it("returns branch/hash/isClean for a real local git repo", async () => {
       const { execFileSync } = await import("node:child_process");
       const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "projects-git-status-real-"));
-      execFileSync("git", ["init", "-b", "main"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["init", "-b", "main"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       execFileSync("git", ["config", "user.email", "test@example.com"], {
         cwd: projectCwd,
         stdio: "pipe",
+        env: gitEnv(),
       });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "Test"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       fs.writeFileSync(path.join(projectCwd, "a.txt"), "a");
-      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe" });
-      execFileSync("git", ["commit", "-m", "initial"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe", env: gitEnv() });
+      execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
 
       const app = await buildApp();
       const created = await app.inject({
@@ -866,15 +915,28 @@ describe("projects route", () => {
     it("503s (not 204) for a local project that IS a repo but git status fails transiently", async () => {
       const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "projects-git-status-transient-"));
       const { execFileSync } = await import("node:child_process");
-      execFileSync("git", ["init", "-b", "main"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["init", "-b", "main"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       execFileSync("git", ["config", "user.email", "test@example.com"], {
         cwd: projectCwd,
         stdio: "pipe",
+        env: gitEnv(),
       });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "Test"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       fs.writeFileSync(path.join(projectCwd, "a.txt"), "a");
-      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe" });
-      execFileSync("git", ["commit", "-m", "initial"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe", env: gitEnv() });
+      execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       // Break HEAD so `git status` fails while `.git` still exists — the
       // same technique as git-status.test.ts's own transient-failure test.
       fs.unlinkSync(path.join(projectCwd, ".git", "HEAD"));
@@ -927,16 +989,33 @@ describe("projects route", () => {
     it("returns branches and worktrees for a real local git repo", async () => {
       const { execFileSync } = await import("node:child_process");
       const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "projects-git-branches-real-"));
-      execFileSync("git", ["init", "-b", "main"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["init", "-b", "main"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       execFileSync("git", ["config", "user.email", "test@example.com"], {
         cwd: projectCwd,
         stdio: "pipe",
+        env: gitEnv(),
       });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "Test"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
       fs.writeFileSync(path.join(projectCwd, "a.txt"), "a");
-      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe" });
-      execFileSync("git", ["commit", "-m", "initial"], { cwd: projectCwd, stdio: "pipe" });
-      execFileSync("git", ["branch", "feature/foo"], { cwd: projectCwd, stdio: "pipe" });
+      execFileSync("git", ["add", "-A"], { cwd: projectCwd, stdio: "pipe", env: gitEnv() });
+      execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
+      execFileSync("git", ["branch", "feature/foo"], {
+        cwd: projectCwd,
+        stdio: "pipe",
+        env: gitEnv(),
+      });
 
       const app = await buildApp();
       const created = await app.inject({

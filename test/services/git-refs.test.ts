@@ -4,9 +4,10 @@ import path from "node:path";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { listBranches, listWorktrees } from "../../src/services/git-refs.js";
+import { gitEnv } from "../../src/services/git-env.js";
 
 function git(cwd: string, args: string[]) {
-  execFileSync("git", args, { cwd, stdio: "pipe" });
+  execFileSync("git", args, { cwd, stdio: "pipe", env: gitEnv() });
 }
 
 function initRepo(cwd: string) {
@@ -18,7 +19,8 @@ function initRepo(cwd: string) {
 
 function commitAll(cwd: string, message: string) {
   git(cwd, ["add", "-A"]);
-  git(cwd, ["commit", "-m", message]);
+  // --no-verify: this is a throwaway fixture repo, no hooks should run.
+  git(cwd, ["commit", "-m", message, "--no-verify"]);
 }
 
 describe("listBranches", () => {
@@ -107,7 +109,7 @@ describe("listWorktrees", () => {
     fs.writeFileSync(path.join(tmpDir, "a.txt"), "a");
     commitAll(tmpDir, "initial");
 
-    const linkedPath = path.join(tmpDir, "..", "linked-worktree");
+    const linkedPath = `${tmpDir}-linked-worktree`;
     git(tmpDir, ["worktree", "add", "-b", "agent/task-1", linkedPath]);
 
     const worktrees = await listWorktrees(tmpDir);
@@ -125,7 +127,7 @@ describe("listWorktrees", () => {
     fs.writeFileSync(path.join(tmpDir, "a.txt"), "a");
     commitAll(tmpDir, "initial");
 
-    const linkedPath = path.join(tmpDir, "..", "detached-worktree");
+    const linkedPath = `${tmpDir}-detached-worktree`;
     git(tmpDir, ["worktree", "add", "--detach", linkedPath]);
 
     const worktrees = await listWorktrees(tmpDir);

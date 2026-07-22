@@ -8,9 +8,10 @@ import {
   isGitRepo,
   clearGitStatusCacheForTests,
 } from "../../src/services/git-status.js";
+import { gitEnv } from "../../src/services/git-env.js";
 
 function git(cwd: string, args: string[]) {
-  execFileSync("git", args, { cwd, stdio: "pipe" });
+  execFileSync("git", args, { cwd, stdio: "pipe", env: gitEnv() });
 }
 
 function initRepo(cwd: string) {
@@ -22,7 +23,8 @@ function initRepo(cwd: string) {
 
 function commitAll(cwd: string, message: string) {
   git(cwd, ["add", "-A"]);
-  git(cwd, ["commit", "-m", message]);
+  // --no-verify: this is a throwaway fixture repo, no hooks should run.
+  git(cwd, ["commit", "-m", message, "--no-verify"]);
 }
 
 describe("getGitStatus", () => {

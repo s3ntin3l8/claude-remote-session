@@ -1,6 +1,7 @@
 import { spawn as spawnChild } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { gitEnv } from "./git-env.js";
 
 // The repo's first `git` CLI shell-out (issue #76) — everything else that
 // reads git state (git-remote.ts, git-branch.ts) is a pure filesystem read.
@@ -58,6 +59,7 @@ function runGitStatus(cwd: string): Promise<string | null> {
     let settled = false;
     const child = spawnChild("git", ["-C", cwd, "status", "--porcelain=v2", "--branch"], {
       stdio: ["ignore", "pipe", "pipe"],
+      env: gitEnv(),
     });
 
     const finish = (value: string | null) => {

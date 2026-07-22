@@ -1,6 +1,7 @@
 import { spawn as spawnChild } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { gitEnv } from "./git-env.js";
 
 // Branch + worktree enumeration for the GitPanel (issue #162's "worktree
 // awareness" half): the repo's first `git branch`/`git worktree list`-style
@@ -49,6 +50,7 @@ function runGit(cwd: string, args: string[]): Promise<string | null> {
     let settled = false;
     const child = spawnChild("git", ["-C", cwd, ...args], {
       stdio: ["ignore", "pipe", "ignore"],
+      env: gitEnv(),
     });
 
     const finish = (value: string | null) => {
