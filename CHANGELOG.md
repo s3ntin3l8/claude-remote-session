@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.13](https://github.com/s3ntin3l8/tessera-session-manager/compare/v0.1.12...v0.1.13) (2026-07-22)
+
+
+### Features
+
+* batch git-status endpoint to avoid per-project rate limiting ([#203](https://github.com/s3ntin3l8/tessera-session-manager/issues/203)) ([29a02ce](https://github.com/s3ntin3l8/tessera-session-manager/commit/29a02ce72fc2fcdb618b0efecc0f179dc4eb89b7))
+
+
+### Bug Fixes
+
+* honor OSC 52 clipboard writes from terminal programs ([#206](https://github.com/s3ntin3l8/tessera-session-manager/issues/206)) ([cc6d492](https://github.com/s3ntin3l8/tessera-session-manager/commit/cc6d4928fa3b090b00d5883bc356eb49bc335dc8))
+* recognize alt-screen/mouse-mode escape sequences split across PTY reads ([#207](https://github.com/s3ntin3l8/tessera-session-manager/issues/207)) ([979b3b0](https://github.com/s3ntin3l8/tessera-session-manager/commit/979b3b0f382ce7ddf5aafb38cbb2fbcf56b4cf13))
+* sanitize leaked GIT_* env vars in git-invoking code and tests ([#205](https://github.com/s3ntin3l8/tessera-session-manager/issues/205)) ([8d03d73](https://github.com/s3ntin3l8/tessera-session-manager/commit/8d03d733ba9be030c468ede06fe52e9754ddcbdf))
+
 ## [0.1.12](https://github.com/s3ntin3l8/tessera-session-manager/compare/v0.1.11...v0.1.12) (2026-07-22)
 
 
