@@ -36,6 +36,7 @@ jobs:
       github.event_name == 'pull_request' &&
       github.actor != 's3ntin3l8-hermes[bot]' &&
       github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]' &&
       github.event.pull_request.draft == false
     permissions:
       contents: write
