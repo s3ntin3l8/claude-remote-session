@@ -8,6 +8,9 @@ import {
   detectAttentionSignals,
   classifyActivityFromTitle,
   detectAltScreenSwitch,
+  applyMouseModeChanges,
+  INITIAL_MOUSE_TRACKING_STATE,
+  type MouseTrackingState,
 } from "./attention-detect.js";
 import { buildSessionEnv } from "./session-env.js";
 
@@ -95,6 +98,24 @@ const SCROLLBACK_MAX_BYTES = 1024 * 1024;
 // rather than whatever mode the raw buffered bytes happen to leave it in.
 const ALT_SCREEN_ENTER = "\x1b[?1049h";
 const ALT_SCREEN_EXIT = "\x1b[?1049l";
+
+// Canonical enable sequences synthesized into the scrollback-replay preamble
+// for tracked mouse-tracking state (see Session.mouseTracking and
+// MouseTrackingState in attention-detect.ts) — same "always emit the modern
+// form regardless of which variant the program actually used" rationale as
+// ALT_SCREEN_ENTER/EXIT above. Only enable sequences are needed: when tracked
+// state is the default (protocol "NONE" / encoding "DEFAULT"), nothing is
+// appended to the preamble at all — see getScrollback().
+const MOUSE_PROTOCOL_ENABLE: Record<Exclude<MouseTrackingState["protocol"], "NONE">, string> = {
+  X10: "\x1b[?9h",
+  VT200: "\x1b[?1000h",
+  DRAG: "\x1b[?1002h",
+  ANY: "\x1b[?1003h",
+};
+const MOUSE_ENCODING_ENABLE: Record<Exclude<MouseTrackingState["encoding"], "DEFAULT">, string> = {
+  SGR: "\x1b[?1006h",
+  SGR_PIXELS: "\x1b[?1016h",
+};
 
 // How long after nudgeRedraw()'s final resize to keep suppressing scrollback
 // capture (see Session.suppressScrollback). The repaint a resize provokes
@@ -195,6 +216,14 @@ export class Session {
   // instead of inferring it from stream balance is what makes replay correct
   // in both directions (see issue #83).
   private inAltScreen = false;
+  // Tracked mouse-tracking-mode truth, the same deliberate way inAltScreen
+  // above tracks screen mode — see MouseTrackingState's docstring in
+  // attention-detect.ts for the full rationale (issue #93: a reconnecting
+  // client whose fresh xterm.js never sees the program's original
+  // mouse-enabling escape, because it aged out of the bounded scrollback
+  // ring buffer, silently defaults to no tracking while the real process is
+  // never told anything changed).
+  private mouseTracking: MouseTrackingState = INITIAL_MOUSE_TRACKING_STATE;
   // True while a nudgeRedraw() repaint is in flight — see nudgeRedraw()'s
   // suppression window. While set, onData still fans chunks out to live
   // subscribers (a reconnecting client must see the repaint) but does not
@@ -396,6 +425,7 @@ export class Session {
 
       const altScreenSwitch = detectAltScreenSwitch(data);
       if (altScreenSwitch !== null) this.inAltScreen = altScreenSwitch === "alt";
+      this.mouseTracking = applyMouseModeChanges(data, this.mouseTracking);
 
       // A bell arriving mid-burst was a work-in-progress notification, not a
       // "waiting for input" signal — clear the sticky attention flag. Reads
@@ -535,17 +565,37 @@ export class Session {
   }
 
   /**
-   * Everything currently buffered, oldest first, prefixed with a screen-mode
-   * preamble synthesized from tracked alt-screen state — replay this to a
-   * newly-attaching client. The preamble is unconditional (even against an
-   * empty buffer) so a freshly-connecting xterm.js always lands in the
-   * correct mode rather than whatever it happened to default to; forcing
-   * primary when already in primary, or alt when already in alt, is a no-op
-   * escape sequence either way. See inAltScreen's docstring for why this
-   * can't just trust the buffered bytes themselves to be self-balanced.
+   * Everything currently buffered, oldest first, prefixed with a preamble
+   * synthesized from tracked alt-screen and mouse-tracking state — replay
+   * this to a newly-attaching client. The alt-screen half of the preamble is
+   * unconditional (even against an empty buffer) so a freshly-connecting
+   * xterm.js always lands in the correct mode rather than whatever it
+   * happened to default to; forcing primary when already in primary, or alt
+   * when already in alt, is a no-op escape sequence either way. See
+   * inAltScreen's docstring for why this can't just trust the buffered bytes
+   * themselves to be self-balanced.
+   *
+   * The mouse-tracking half is appended only when tracked state isn't the
+   * default (protocol "NONE" / encoding "DEFAULT") — unlike alt-screen mode,
+   * xterm.js's own default already IS "no tracking," so there's nothing to
+   * force when that's also the tracked truth; this also keeps the emitted
+   * bytes identical to before this mechanism existed for the common
+   * untracked case. Order (alt-screen, then protocol, then encoding) isn't
+   * load-bearing — these are independent xterm.js subsystems (?1049 never
+   * touches CoreMouseService) — chosen only to match typical program emit
+   * order. See MouseTrackingState's docstring in attention-detect.ts for why
+   * this exists (issue #93).
    */
   getScrollback(): Buffer {
-    const preamble = Buffer.from(this.inAltScreen ? ALT_SCREEN_ENTER : ALT_SCREEN_EXIT, "utf8");
+    const altPreamble = this.inAltScreen ? ALT_SCREEN_ENTER : ALT_SCREEN_EXIT;
+    let mousePreamble = "";
+    if (this.mouseTracking.protocol !== "NONE") {
+      mousePreamble += MOUSE_PROTOCOL_ENABLE[this.mouseTracking.protocol];
+    }
+    if (this.mouseTracking.encoding !== "DEFAULT") {
+      mousePreamble += MOUSE_ENCODING_ENABLE[this.mouseTracking.encoding];
+    }
+    const preamble = Buffer.from(altPreamble + mousePreamble, "utf8");
     return Buffer.concat([preamble, ...this.scrollback]);
   }
 

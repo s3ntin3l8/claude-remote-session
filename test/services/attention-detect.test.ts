@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   detectAttentionSignals,
   classifyActivityFromTitle,
+  applyMouseModeChanges,
+  INITIAL_MOUSE_TRACKING_STATE,
+  type MouseTrackingState,
 } from "../../src/services/attention-detect.js";
 
 const ESC = "\x1b";
@@ -111,5 +114,81 @@ describe("classifyActivityFromTitle", () => {
     // "Waiting..." matches both the idle word "Waiting" and the working
     // pattern's trailing ellipsis — the idle word must win.
     expect(classifyActivityFromTitle("Waiting...", "opencode")).toBe("idle");
+  });
+});
+
+describe("applyMouseModeChanges", () => {
+  it("returns the same reference (not just an equal value) for plain output with no mode switches", () => {
+    const prev: MouseTrackingState = { protocol: "ANY", encoding: "SGR" };
+    expect(applyMouseModeChanges("just some regular output\n", prev)).toBe(prev);
+  });
+
+  it("tracks a single protocol enable", () => {
+    expect(applyMouseModeChanges(`${ESC}[?1003h`, INITIAL_MOUSE_TRACKING_STATE)).toEqual({
+      protocol: "ANY",
+      encoding: "DEFAULT",
+    });
+  });
+
+  it("tracks a single encoding enable", () => {
+    expect(applyMouseModeChanges(`${ESC}[?1006h`, INITIAL_MOUSE_TRACKING_STATE)).toEqual({
+      protocol: "NONE",
+      encoding: "SGR",
+    });
+  });
+
+  it("tracks the confirmed #93 bug sequence: protocol and encoding enabled together", () => {
+    expect(
+      applyMouseModeChanges(`${ESC}[?1003h${ESC}[?1006h`, INITIAL_MOUSE_TRACKING_STATE),
+    ).toEqual({ protocol: "ANY", encoding: "SGR" });
+  });
+
+  it("last-set-wins across separate calls", () => {
+    let state = applyMouseModeChanges(`${ESC}[?1000h`, INITIAL_MOUSE_TRACKING_STATE);
+    expect(state.protocol).toBe("VT200");
+    state = applyMouseModeChanges(`${ESC}[?1003h`, state);
+    expect(state.protocol).toBe("ANY");
+  });
+
+  it("resets the whole protocol axis to NONE on DECRST for any protocol code, not just the one last set (xterm's own fall-through)", () => {
+    // ?1000l reset arrives while ?1003 (ANY) is the active protocol — real
+    // xterm.js still collapses to NONE here (InputHandler's DECRST case
+    // block falls through 9/1000/1002/1003 into one assignment), which is
+    // exactly why this reducer tracks a derived enum rather than a raw
+    // per-code on/off map.
+    let state = applyMouseModeChanges(`${ESC}[?1003h`, INITIAL_MOUSE_TRACKING_STATE);
+    expect(state.protocol).toBe("ANY");
+    state = applyMouseModeChanges(`${ESC}[?1000l`, state);
+    expect(state.protocol).toBe("NONE");
+  });
+
+  it("returns to the initial state on matching disable", () => {
+    let state = applyMouseModeChanges(`${ESC}[?1003h${ESC}[?1006h`, INITIAL_MOUSE_TRACKING_STATE);
+    state = applyMouseModeChanges(`${ESC}[?1003l${ESC}[?1006l`, state);
+    expect(state).toEqual(INITIAL_MOUSE_TRACKING_STATE);
+  });
+
+  it("tracks the SGR_PIXELS encoding", () => {
+    let state = applyMouseModeChanges(`${ESC}[?1016h`, INITIAL_MOUSE_TRACKING_STATE);
+    expect(state.encoding).toBe("SGR_PIXELS");
+    state = applyMouseModeChanges(`${ESC}[?1016l`, state);
+    expect(state.encoding).toBe("DEFAULT");
+  });
+
+  it("treats 1005/1015 DECSET as a no-op but honors their DECRST as a courtesy reset to DEFAULT", () => {
+    // xterm.js no longer implements 1005 (utf8 ext mode)/1015 (urxvt ext
+    // mode) — DECSET for either is a no-op there, so tracking a DECSET for
+    // them would silently diverge from what a real xterm.js ends up with.
+    let state = applyMouseModeChanges(`${ESC}[?1006h`, INITIAL_MOUSE_TRACKING_STATE);
+    state = applyMouseModeChanges(`${ESC}[?1005h`, state);
+    expect(state.encoding).toBe("SGR"); // 1005h is a no-op, SGR from 1006h is untouched
+    state = applyMouseModeChanges(`${ESC}[?1005l`, state);
+    expect(state.encoding).toBe("DEFAULT"); // 1005l still courtesy-resets encoding
+  });
+
+  it("ignores unrelated DECSET modes (alt-screen, bracketed paste, application cursor keys)", () => {
+    const prev: MouseTrackingState = { protocol: "ANY", encoding: "SGR" };
+    const chunk = `${ESC}[?1049h${ESC}[?2004h${ESC}[?1h`;
+    expect(applyMouseModeChanges(chunk, prev)).toBe(prev);
   });
 });

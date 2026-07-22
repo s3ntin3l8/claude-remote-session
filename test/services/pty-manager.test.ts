@@ -312,6 +312,148 @@ describe("PtyManager", () => {
     expect(session.getScrollback().toString().startsWith("\x1b[?1049h")).toBe(true);
   });
 
+  // Mirrors the alt-screen preamble tests above, for the same class of gap
+  // (issue #93): tracked mouse-tracking state, synthesized into the replay
+  // preamble so a reconnecting client doesn't silently lose mouse tracking
+  // once the program's original enabling escape ages out of the scrollback
+  // ring buffer. See MouseTrackingState's docstring in attention-detect.ts.
+  it("tracks mouse-tracking state and prepends a matching preamble on replay", async () => {
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    fakePtyChildren[0].emitData("\x1b[?1003h\x1b[?1006h");
+    // startsWith, not exact equality — the raw buffered bytes ALSO begin
+    // with this same escape sequence (pushScrollback stores it verbatim
+    // regardless of mode tracking), same reason the alt-screen tests above
+    // use startsWith rather than asserting the full byte count.
+    expect(
+      session.getScrollback().toString().startsWith(`${PRIMARY_PREAMBLE}\x1b[?1003h\x1b[?1006h`),
+    ).toBe(true);
+  });
+
+  it("restores mouse tracking on replay even after the original enabling bytes are evicted from scrollback — the confirmed #93 bug", async () => {
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    fakePtyChildren[0].emitData("\x1b[?1003h\x1b[?1006h");
+    // Push well past the 1 MiB scrollback cap so the enabling escape above
+    // is FIFO-evicted — the same thing that happens to a real, heavily-
+    // active session (e.g. the "WORKING" opencode session from the live
+    // repro) between when it started and when a browser reconnects.
+    const chunk = "x".repeat(256 * 1024);
+    for (let i = 0; i < 8; i++) fakePtyChildren[0].emitData(chunk);
+
+    const scrollback = session.getScrollback().toString();
+    expect(scrollback.startsWith(`${PRIMARY_PREAMBLE}\x1b[?1003h\x1b[?1006h`)).toBe(true);
+    // Confirm the raw bytes are genuinely gone from the buffered portion —
+    // this is the preamble doing real work, not coincidentally still there.
+    expect(scrollback.slice(`${PRIMARY_PREAMBLE}\x1b[?1003h\x1b[?1006h`.length)).not.toContain(
+      "\x1b[?1003h",
+    );
+  });
+
+  it("does not resurrect mouse tracking that was explicitly disabled before reconnect", async () => {
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    fakePtyChildren[0].emitData("\x1b[?1003h\x1b[?1006h");
+    fakePtyChildren[0].emitData("\x1b[?1003l\x1b[?1006l");
+
+    // Final tracked state is NONE/DEFAULT, so the mouse preamble is empty —
+    // this IS exact-equality-safe (unlike the enabled-state tests above)
+    // since nothing is being prepended on top of the raw buffered bytes,
+    // which are both emitted chunks concatenated verbatim (neither evicted).
+    expect(session.getScrollback().toString()).toBe(
+      `${PRIMARY_PREAMBLE}\x1b[?1003h\x1b[?1006h\x1b[?1003l\x1b[?1006l`,
+    );
+  });
+
+  it("replays the LAST protocol set when it changes mid-session", async () => {
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    fakePtyChildren[0].emitData("\x1b[?1000h");
+    fakePtyChildren[0].emitData("\x1b[?1003h");
+
+    // Check the PREAMBLE specifically (its known, exact prefix), not the
+    // whole getScrollback() output — the raw buffered bytes legitimately
+    // still contain "\x1b[?1000h" as history (pushScrollback stores
+    // everything verbatim regardless of mode tracking), so a whole-string
+    // not-toContain check would be testing the wrong thing.
+    const scrollback = session.getScrollback().toString();
+    expect(scrollback.startsWith(`${PRIMARY_PREAMBLE}\x1b[?1003h`)).toBe(true);
+    expect(scrollback.startsWith(`${PRIMARY_PREAMBLE}\x1b[?1000h`)).toBe(false);
+  });
+
+  it("omits the mouse preamble when a DECRST for any protocol code resets the whole protocol axis (xterm's own cross-code fall-through)", async () => {
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    // ?1002h then ?1003h then ?1003l — real xterm.js ends at NONE here (its
+    // DECRST case block falls through 9/1000/1002/1003 into one
+    // activeProtocol = 'NONE' assignment), even though ?1002 itself was
+    // never reset. This is the case that would trip up a naive per-code
+    // "last seen on" map instead of tracking the derived protocol enum.
+    fakePtyChildren[0].emitData("\x1b[?1002h\x1b[?1003h");
+    fakePtyChildren[0].emitData("\x1b[?1003l");
+
+    // Final tracked protocol is NONE, so the mouse preamble is empty —
+    // exact-equality-safe against the raw buffered bytes (both chunks,
+    // concatenated verbatim, neither evicted) with no preamble contribution.
+    expect(session.getScrollback().toString()).toBe(
+      `${PRIMARY_PREAMBLE}\x1b[?1002h\x1b[?1003h\x1b[?1003l`,
+    );
+  });
+
+  it("combines the alt-screen and mouse-tracking preambles correctly", async () => {
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    fakePtyChildren[0].emitData("\x1b[?1049h\x1b[?1003h\x1b[?1006h");
+
+    // startsWith, not exact equality — same duplication reason as the
+    // mouse-only "prepends a matching preamble" test above.
+    expect(session.getScrollback().toString().startsWith("\x1b[?1049h\x1b[?1003h\x1b[?1006h")).toBe(
+      true,
+    );
+  });
+
   it("suppresses scrollback capture during a nudgeRedraw repaint but still delivers it live", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {

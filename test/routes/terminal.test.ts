@@ -305,6 +305,32 @@ describe("terminal route (/ws/terminal)", () => {
     await app.close();
   });
 
+  it("also replays tracked mouse-tracking state in the scrollback preamble (issue #93)", async () => {
+    const { app, port } = await buildAndListen();
+    const { sessionId, pty } = await createProjectAndSession(app);
+    pty.emitData("\x1b[?1003h\x1b[?1006hexisting output");
+
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${port}/ws/terminal?sessionId=${sessionId}&cols=80&rows=24`,
+    );
+    ws.binaryType = "arraybuffer";
+    const messagePromise = waitForMessage(ws);
+    await waitForOpenOrClose(ws);
+    const event = await messagePromise;
+    // Same screen-mode preamble as the test above ("\x1b[?1049l"), now also
+    // carrying the tracked mouse-tracking-mode preamble ahead of the raw
+    // buffered bytes — a freshly-attaching xterm.js re-derives the correct
+    // CoreMouseService state even once this fix's real value shows up: when
+    // the original enabling escape has aged out of the scrollback ring
+    // buffer entirely (see the pty-manager.test.ts eviction test).
+    const replayed = Buffer.from(event.data as ArrayBuffer).toString("utf8");
+    expect(replayed.startsWith("\x1b[?1049l\x1b[?1003h\x1b[?1006h")).toBe(true);
+    expect(replayed).toContain("existing output");
+
+    ws.close();
+    await app.close();
+  });
+
   it("does not kill the session when the socket closes", async () => {
     const { app, port } = await buildAndListen();
     const { sessionId } = await createProjectAndSession(app);

@@ -110,3 +110,76 @@ export function detectAltScreenSwitch(chunk: string): "alt" | "primary" | null {
   }
   return result;
 }
+
+// Derived xterm.js CoreMouseService state tracked the same deliberate way
+// detectAltScreenSwitch/inAltScreen track screen mode above — issue #93's
+// "opencode sometimes cycles prompt history instead of scrolling on mouse
+// wheel" traced to exactly this gap: a reconnecting client's fresh xterm.js
+// only ever sees whatever DECSET bytes are still within the bounded
+// scrollback ring buffer (see SCROLLBACK_MAX_BYTES in pty-manager.ts), so if
+// the program's original mouse-tracking-enabling escape has aged out by the
+// time a client (re)attaches, the client silently defaults to no tracking
+// while the real process is never told anything changed. protocol/encoding
+// are kept as two independent derived enums (not a raw per-DECSET-code
+// on/off map) because that's what xterm.js itself derives them into —
+// critically, DECRST's reset side doesn't mirror DECSET's per-code
+// granularity: resetting any of ?9/?1000/?1002/?1003 collapses the whole
+// protocol axis to "NONE" (xterm.js's InputHandler DECRST case block falls
+// through all four into one activeProtocol = 'NONE' assignment), so e.g.
+// ?1002h then ?1003h then ?1003l genuinely ends with tracking OFF even
+// though ?1002 was never itself reset — a naive per-code "on" map would get
+// this wrong. Encoding (?1006 SGR / ?1016 SGR_PIXELS) is a separate,
+// independent axis.
+export interface MouseTrackingState {
+  /** xterm.js CoreMouseService protocol; "NONE" = mouse tracking off. */
+  protocol: "NONE" | "X10" | "VT200" | "DRAG" | "ANY";
+  /** xterm.js CoreMouseService encoding; "DEFAULT" = legacy X10 byte encoding. */
+  encoding: "DEFAULT" | "SGR" | "SGR_PIXELS";
+}
+
+export const INITIAL_MOUSE_TRACKING_STATE: MouseTrackingState = {
+  protocol: "NONE",
+  encoding: "DEFAULT",
+};
+
+const MOUSE_PROTOCOL_BY_CODE = { 9: "X10", 1000: "VT200", 1002: "DRAG", 1003: "ANY" } as const;
+const MOUSE_ENCODING_BY_CODE = { 1006: "SGR", 1016: "SGR_PIXELS" } as const;
+
+// Matches any DECSET/DECRST for the mouse-tracking-protocol codes (9/1000/
+// 1002/1003), the two encodings xterm.js still implements (1006/1016), and
+// the two it no longer does (1005/1015 -- removed upstream in xterm.js's own
+// tracker; DECRST still courtesy-resets encoding to DEFAULT for these,
+// DECSET is a no-op). Known limitation, same one ALT_SCREEN_SWITCH above
+// already has: a combined-parameter form like `\x1b[?1003;1006h` isn't
+// matched -- doesn't affect the confirmed #93 bug, since the programs
+// observed emit separate sequences per mode.
+// eslint-disable-next-line no-control-regex
+const MOUSE_MODE_SWITCH = /\x1b\[\?(9|1000|1002|1003|1005|1006|1015|1016)([hl])/g;
+
+/**
+ * Scans a chunk for mouse-tracking DECSET/DECRST sequences and folds them
+ * into `prev`, returning the resulting state (or `prev` itself, unchanged,
+ * if the chunk contains none -- the common case). See MouseTrackingState's
+ * docstring for why protocol/encoding are derived enums rather than a raw
+ * per-code map, and specifically why a DECRST for *any* protocol code resets
+ * the whole protocol axis to "NONE" rather than just that code.
+ */
+export function applyMouseModeChanges(chunk: string, prev: MouseTrackingState): MouseTrackingState {
+  let { protocol, encoding } = prev;
+  for (const match of chunk.matchAll(MOUSE_MODE_SWITCH)) {
+    const code = Number(match[1]);
+    const set = match[2] === "h";
+    if (code in MOUSE_PROTOCOL_BY_CODE) {
+      protocol = set ? MOUSE_PROTOCOL_BY_CODE[code as keyof typeof MOUSE_PROTOCOL_BY_CODE] : "NONE";
+    } else if (code in MOUSE_ENCODING_BY_CODE) {
+      encoding = set
+        ? MOUSE_ENCODING_BY_CODE[code as keyof typeof MOUSE_ENCODING_BY_CODE]
+        : "DEFAULT";
+    } else if (!set) {
+      // 1005/1015 DECRST courtesy-reset only -- DECSET for these is a no-op
+      // in xterm.js (see the regex comment above).
+      encoding = "DEFAULT";
+    }
+  }
+  return protocol === prev.protocol && encoding === prev.encoding ? prev : { protocol, encoding };
+}
