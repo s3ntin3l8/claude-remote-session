@@ -1,8 +1,8 @@
-# Tessera Roadmap — Central Command for AI-Driven Development
+# Mullion Roadmap — Central Command for AI-Driven Development
 
 **Status:** Draft
 **Last updated:** 2026-07-22
-**Vision:** Tessera orchestrates the entire AI-driven development workflow. Describe a task, Tessera spawns the right agent(s), monitors progress, notifies when input is needed, presents diffs for review, and cycles through approval/resubmit — all from one dashboard, replacing the traditional IDE.
+**Vision:** Mullion orchestrates the entire AI-driven development workflow. Describe a task, Mullion spawns the right agent(s), monitors progress, notifies when input is needed, presents diffs for review, and cycles through approval/resubmit — all from one dashboard, replacing the traditional IDE.
 
 ---
 
@@ -34,36 +34,38 @@ These decisions apply across multiple phases and are established here to avoid r
 | 1.4 | Notification panel — slide-out sidebar/overlay listing recent events grouped by workspace                                                                   | L      | 1.1        |
 | 1.5 | Desktop notifications via Browser Notification API — fire when tab is unfocused                                                                             | S      | 1.1        |
 | 1.6 | Attention-clear heuristics — refine the current `ATTENTION_CLEAR_WINDOW_MS` logic to avoid false positives from rapid BEL/OSC sequences during heavy output | S      | 1.1        |
+| 1.7 | Sidebar session row redesign — surface worktree/branch/PR info per session inline, alongside the notification status line from 1.2                          | L      | 1.1, 1.2   |
 
 ### Design Notes
 
 - Events are in-memory only (ring buffer per session, ~100 events). No DB persistence in Phase 1.
 - The `kind` enum starts with `attention`, `status_change`, `title_change` and is extended in later phases.
 - The frontend notification panel is a new component, not embedded in the existing sidebar. Accessible via a bell icon in the toolbar (existing) but opens a dedicated panel.
+- The sidebar redesign (1.7) is the Phase 1 frontend flagship — the notification status line (1.2) and git/worktree/PR info make the session row the primary information surface. Backend work includes per-worktree git status polling, per-branch PR filtering, and branch/worktree enumeration endpoints (`git-refs`).
 
 ---
 
 ## Phase 2: Agent Hook System
 
-**Goal:** Create a structured communication channel from agents to Tessera via environment-injected hooks — delivering rich metadata that PTY parsing alone cannot extract.
+**Goal:** Create a structured communication channel from agents to Mullion via environment-injected hooks — delivering rich metadata that PTY parsing alone cannot extract.
 
 ### Features
 
 | #   | Feature                                                                                                                                             | Effort | Depends On |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------- |
-| 2.1 | `TESSERA_HOOK_SOCKET` env injection at session spawn time                                                                                           | M      | —          |
+| 2.1 | `MULLION_HOOK_SOCKET` env injection at session spawn time                                                                                           | M      | —          |
 | 2.2 | Hook JSON protocol definition + server-side validation                                                                                              | S      | 2.1        |
-| 2.3 | Claude Code hook integration — wire `TESSERA_HOOK_SOCKET` into Claude Code's existing hook system                                                   | S      | 2.2        |
+| 2.3 | Claude Code hook integration — wire `MULLION_HOOK_SOCKET` into Claude Code's existing hook system                                                   | S      | 2.2        |
 | 2.4 | OpenCode hook integration — same for OpenCode's hook system                                                                                         | S      | 2.2        |
 | 2.5 | Hook messages routed into the notification event model (Phase 1.1)                                                                                  | S      | 1.1, 2.2   |
-| 2.6 | File change events — agent reports modified files via hook, Tessera surfaces them in the sidebar                                                    | M      | 2.5        |
-| 2.7 | Minimal review gate — agent emits a `review_gate` event, Tessera shows a pending-review indicator, user can approve/deny via the notification panel | M      | 2.5, 1.4   |
+| 2.6 | File change events — agent reports modified files via hook, Mullion surfaces them in the sidebar                                                    | M      | 2.5        |
+| 2.7 | Minimal review gate — agent emits a `review_gate` event, Mullion shows a pending-review indicator, user can approve/deny via the notification panel | M      | 2.5, 1.4   |
 
 ### Design Notes
 
 - No filesystem modifications (no dotfile writes, no agent config changes). Everything is environment injection at spawn time.
 - Agents that don't support hooks continue to work perfectly via PTY-parsed channel (Phase 1 covers those).
-- Hook messages are JSON over a Unix socket (`TESSERA_HOOK_SOCKET`) — the agent writes one JSON object per line. Tessera's socket listener is lightweight (single-threaded read loop, non-blocking).
+- Hook messages are JSON over a Unix socket (`MULLION_HOOK_SOCKET`) — the agent writes one JSON object per line. Mullion's socket listener is lightweight (single-threaded read loop, non-blocking).
 - The review gate is the first step toward the long-term Task → Agent → Review loop vision.
 
 ---
@@ -87,32 +89,32 @@ These decisions apply across multiple phases and are established here to avoid r
 
 - Playwright launches a Chromium instance per project (or per workspace, configurable). The instance persists across pane open/close — closing the pane doesn't kill the browser.
 - Frame streaming: Playwright's CDP screenshots are pushed via WebSocket to the frontend at ~5fps (configurable). The iframe renders these frames. User interactions (clicks in the iframe) are proxied back through the WebSocket to Playwright.
-- The agent automation API is the bridge between the agent's chat context and the browser. When an agent says "I'll open the preview", it sends a `navigate` action via Tessera's API, and the browser pane updates.
-- Combined with Phase 2 hooks: an agent could emit `{"kind":"browser_request","action":"navigate","url":"http://localhost:5173"}` via the hook socket, and Tessera opens the URL in the project's browser pane.
+- The agent automation API is the bridge between the agent's chat context and the browser. When an agent says "I'll open the preview", it sends a `navigate` action via Mullion's API, and the browser pane updates.
+- Combined with Phase 2 hooks: an agent could emit `{"kind":"browser_request","action":"navigate","url":"http://localhost:5173"}` via the hook socket, and Mullion opens the URL in the project's browser pane.
 
 ---
 
 ## Phase 4: Socket API
 
-**Goal:** A local Unix socket for low-latency, programmatic control of Tessera — supplementing the existing HTTP REST API.
+**Goal:** A local Unix socket for low-latency, programmatic control of Mullion — supplementing the existing HTTP REST API.
 
 ### Features
 
 | #   | Feature                                                                                       | Effort | Depends On |
 | --- | --------------------------------------------------------------------------------------------- | ------ | ---------- |
-| 4.1 | Unix socket transport — single socket at `$TESSERA_SOCKET_PATH`, JSON message framing         | M      | —          |
+| 4.1 | Unix socket transport — single socket at `$MULLION_SOCKET_PATH`, JSON message framing         | M      | —          |
 | 4.2 | PTY I/O over socket — subscribe to session output, write keystrokes                           | M      | 4.1        |
 | 4.3 | Session lifecycle over socket — create, kill, list, inspect sessions                          | S      | 4.1        |
 | 4.4 | Session status / notification events over socket — subscribe to real-time events from Phase 1 | S      | 4.1, 1.1   |
 | 4.5 | Browser actions over socket — trigger navigate/snapshot/click on browser panes                | S      | 4.1, 3.5   |
-| 4.6 | CLI client — `tessera exec <command>` opens session, streams output to stdout, forwards stdin | M      | 4.2, 4.3   |
+| 4.6 | CLI client — `mullion exec <command>` opens session, streams output to stdout, forwards stdin | M      | 4.2, 4.3   |
 
 ### Design Notes
 
 - Every socket operation has an HTTP equivalent. The socket is not a separate API — it's an alternative transport.
 - Auth via filesystem permissions (`0600`) + optional embedded token from the parent process's environment.
 - Message framing matches the existing WebSocket terminal protocol (JSON header with length prefix) so client code can be shared.
-- The CLI client is the primary consumer (`tessera exec`, `tessera ps`, `tessera logs`).
+- The CLI client is the primary consumer (`mullion exec`, `mullion ps`, `mullion logs`).
 
 ---
 
@@ -142,7 +144,7 @@ These decisions apply across multiple phases and are established here to avoid r
 
 ## Long-Term: Review Gate (Post-Phase 5)
 
-**Goal:** Full Task → Agent → Review loop — describe a task, Tessera spawns the agent with context, agent pauses at review points, Tessera presents diffs for approval, user approves or sends back, cycle continues.
+**Goal:** Full Task → Agent → Review loop — describe a task, Mullion spawns the agent with context, agent pauses at review points, Mullion presents diffs for approval, user approves or sends back, cycle continues.
 
 ### Status
 
@@ -217,38 +219,38 @@ These open issues from before the roadmap was established map directly into spec
 
 | Issue                                                                                                                    | How it fits                                                                                                                      | Status                         |
 | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| [#98](https://github.com/s3ntin3l8/tessera-session-manager/issues/98) — Visual highlights for panels needing interaction | Core frontend design for attention-state visualization. Feeds into 1.1 (event model) and 1.4 (notification panel).               | Milestone + `phase-1` assigned |
-| [#97](https://github.com/s3ntin3l8/tessera-session-manager/issues/97) — TUI activity detection false positives           | Root cause analysis and remaining fixes (1/2/4) map to 1.6 (attention-clear heuristics). Fix 3 (lastUserInputAt) already merged. | Closed — superseded by 1.6     |
-| [#95](https://github.com/s3ntin3l8/tessera-session-manager/issues/95) — Mobile PWA push notifications                    | Uses Push API rather than Phase 1's browser Notification API. Parallel track — needs service worker infrastructure (#87) first.  | Kept open, unassigned          |
+| [#98](https://github.com/s3ntin3l8/mullion-session-manager/issues/98) — Visual highlights for panels needing interaction | Core frontend design for attention-state visualization. Feeds into 1.1 (event model) and 1.4 (notification panel).               | Milestone + `phase-1` assigned |
+| [#97](https://github.com/s3ntin3l8/mullion-session-manager/issues/97) — TUI activity detection false positives           | Root cause analysis and remaining fixes (1/2/4) map to 1.6 (attention-clear heuristics). Fix 3 (lastUserInputAt) already merged. | Closed — superseded by 1.6     |
+| [#95](https://github.com/s3ntin3l8/mullion-session-manager/issues/95) — Mobile PWA push notifications                    | Uses Push API rather than Phase 1's browser Notification API. Parallel track — needs service worker infrastructure (#87) first.  | Kept open, unassigned          |
 
 ### Phase 3
 
 | Issue                                                                                                           | How it fits                                                                                                                    | Status                         |
 | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
-| [#110](https://github.com/s3ntin3l8/tessera-session-manager/issues/110) — Browser panel not persisted in layout | Must be fixed before or alongside 3.3 (BrowserPane component). Without layout persistence, browser panes don't survive reload. | Milestone + `phase-3` assigned |
+| [#110](https://github.com/s3ntin3l8/mullion-session-manager/issues/110) — Browser panel not persisted in layout | Must be fixed before or alongside 3.3 (BrowserPane component). Without layout persistence, browser panes don't survive reload. | Milestone + `phase-3` assigned |
 
 ### Phase 4
 
 | Issue                                                                                                             | How it fits                                                                                                                                   | Status                         |
 | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| [#134](https://github.com/s3ntin3l8/tessera-session-manager/issues/134) — tessera CLI, MCP server, auto-detection | CLI component maps directly to 4.6 (CLI client). MCP server extends the socket/API concept. Auto-detection is a Phase 2-adjacent enhancement. | Milestone + `phase-4` assigned |
+| [#134](https://github.com/s3ntin3l8/mullion-session-manager/issues/134) — mullion CLI, MCP server, auto-detection | CLI component maps directly to 4.6 (CLI client). MCP server extends the socket/API concept. Auto-detection is a Phase 2-adjacent enhancement. | Milestone + `phase-4` assigned |
 
 ### Cross-Cutting / Standalone
 
 | Issue                                                                                                        | How it fits                                                                                                               | Status                |
 | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| [#157](https://github.com/s3ntin3l8/tessera-session-manager/issues/157) — Secure Agent Lifecycle & Discovery | Multi-host auth and HMAC-signed requests. Relevant when multi-host becomes a priority but not blocking any current phase. | Kept open, unassigned |
-| [#102](https://github.com/s3ntin3l8/tessera-session-manager/issues/102) — GitHub CI/CD per PR                | Standalone feature. Requires existing GitHub integration to mature first (#60 research).                                  | Kept open, unassigned |
-| [#60](https://github.com/s3ntin3l8/tessera-session-manager/issues/60) — GitHub App investigation             | Research task for webhooks vs. polling. Not blocking.                                                                     | Kept open, unassigned |
+| [#157](https://github.com/s3ntin3l8/mullion-session-manager/issues/157) — Secure Agent Lifecycle & Discovery | Multi-host auth and HMAC-signed requests. Relevant when multi-host becomes a priority but not blocking any current phase. | Kept open, unassigned |
+| [#102](https://github.com/s3ntin3l8/mullion-session-manager/issues/102) — GitHub CI/CD per PR                | Standalone feature. Requires existing GitHub integration to mature first (#60 research).                                  | Kept open, unassigned |
+| [#60](https://github.com/s3ntin3l8/mullion-session-manager/issues/60) — GitHub App investigation             | Research task for webhooks vs. polling. Not blocking.                                                                     | Kept open, unassigned |
 
 ### Prod Bugs (fix regardless of roadmap timing)
 
 | Issue                                                                                                                     | Priority |
 | ------------------------------------------------------------------------------------------------------------------------- | -------- |
-| [#162](https://github.com/s3ntin3l8/tessera-session-manager/issues/162) — Worktree staleness on long-open windows         | Medium   |
-| [#122](https://github.com/s3ntin3l8/tessera-session-manager/issues/122) — Ctrl+V image paste broken on Linux/Windows      | Low      |
-| [#121](https://github.com/s3ntin3l8/tessera-session-manager/issues/121) — Floating peek panels: no close, no drag-drop    | Low      |
-| [#107](https://github.com/s3ntin3l8/tessera-session-manager/issues/107) — Claude Code TUI display: prompt lines disappear | Low      |
-| [#94](https://github.com/s3ntin3l8/tessera-session-manager/issues/94) — Scrollbar thumb size/position off                 | Low      |
-| [#91](https://github.com/s3ntin3l8/tessera-session-manager/issues/91) — Terminal pane visual border/theming               | Low      |
-| [#85](https://github.com/s3ntin3l8/tessera-session-manager/issues/85) — Mobile UI loads desktop split view                | Low      |
+| [#162](https://github.com/s3ntin3l8/mullion-session-manager/issues/162) — Worktree staleness on long-open windows         | Medium   |
+| [#122](https://github.com/s3ntin3l8/mullion-session-manager/issues/122) — Ctrl+V image paste broken on Linux/Windows      | Low      |
+| [#121](https://github.com/s3ntin3l8/mullion-session-manager/issues/121) — Floating peek panels: no close, no drag-drop    | Low      |
+| [#107](https://github.com/s3ntin3l8/mullion-session-manager/issues/107) — Claude Code TUI display: prompt lines disappear | Low      |
+| [#94](https://github.com/s3ntin3l8/mullion-session-manager/issues/94) — Scrollbar thumb size/position off                 | Low      |
+| [#91](https://github.com/s3ntin3l8/mullion-session-manager/issues/91) — Terminal pane visual border/theming               | Low      |
+| [#85](https://github.com/s3ntin3l8/mullion-session-manager/issues/85) — Mobile UI loads desktop split view                | Low      |
