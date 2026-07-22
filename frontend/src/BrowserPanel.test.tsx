@@ -44,19 +44,21 @@ describe("BrowserPanel", () => {
     useDashboardStore.setState({ projects: [] });
   });
 
-  it("shows a not-applicable message when the project has no devServerUrl, without fetching", async () => {
-    const fetchMock = vi.fn();
+  it("shows a not-applicable message when the project has no devServerUrl, with only project-urls fetch", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(200, [])));
     vi.stubGlobal("fetch", fetchMock);
     useDashboardStore.setState({ projects: [{ ...PROJECT, devServerUrl: null }] });
 
     render(<BrowserPanel params={{ projectId: 1 }} />);
 
     expect(await screen.findByText(/no dev server URL configured/i)).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    // A single fetch for project URLs fires on mount (issue #109)
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("/api/projects/1/urls", expect.anything());
   });
 
   it("mentions a detected port in the not-applicable message when one was found (issue #28 phase 7)", async () => {
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(200, [])));
     vi.stubGlobal("fetch", fetchMock);
     useDashboardStore.setState({
       projects: [{ ...PROJECT, devServerUrl: null, detectedDevServerPort: "5173" }],
@@ -65,7 +67,8 @@ describe("BrowserPanel", () => {
     render(<BrowserPanel params={{ projectId: 1 }} />);
 
     expect(await screen.findByText(/detected one running on port 5173/i)).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("/api/projects/1/urls", expect.anything());
   });
 
   it("embeds the dev server URL directly (no POST) when previews aren't enabled server-wide", async () => {
@@ -81,9 +84,8 @@ describe("BrowserPanel", () => {
 
     const frame = await screen.findByTitle("Preview");
     expect(frame).toHaveAttribute("src", PROJECT.devServerUrl);
-    // Only the server-info GET should have fired — no POST /api/previews,
-    // since that route isn't even registered when the feature is off.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Two calls: project-urls fetch + server-info fetch — no POST /api/previews
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("also embeds directly if previewsEnabled is true but previewBaseHost is somehow empty", async () => {
@@ -112,6 +114,9 @@ describe("BrowserPanel", () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
+      if (url === "/api/projects/1/urls" && method === "GET") {
+        return Promise.resolve(jsonResponse(200, []));
+      }
       if (url === "/api/server-info" && method === "GET") {
         const info: ServerInfo = {
           ...SERVER_INFO_BASE,
@@ -151,6 +156,9 @@ describe("BrowserPanel", () => {
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method ?? "GET";
+        if (url === "/api/projects/1/urls" && method === "GET") {
+          return Promise.resolve(jsonResponse(200, []));
+        }
         if (url === "/api/server-info" && method === "GET") {
           return Promise.resolve(
             jsonResponse(200, {
@@ -180,6 +188,9 @@ describe("BrowserPanel", () => {
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method ?? "GET";
+        if (url === "/api/projects/1/urls" && method === "GET") {
+          return Promise.resolve(jsonResponse(200, []));
+        }
         if (url === "/api/server-info" && method === "GET") {
           return Promise.resolve(
             jsonResponse(200, {
@@ -364,6 +375,134 @@ describe("BrowserPanel", () => {
       expect(frame).toHaveAttribute(
         "src",
         `${window.location.protocol}//preview-slug-1.preview.example.com/`,
+      );
+    });
+  });
+
+  describe("saved URLs (issue #109)", () => {
+    const SAVED_URLS = [
+      {
+        id: 10,
+        projectId: 1,
+        label: "Staging",
+        url: "https://staging.example.com",
+        favorite: true,
+        order: 0,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: 11,
+        projectId: 1,
+        label: "CI",
+        url: "https://ci.example.com",
+        favorite: false,
+        order: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+
+    function stubFetch(
+      handler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+    ) {
+      vi.stubGlobal("fetch", vi.fn(handler));
+    }
+
+    const noPreviewInfo = { ...SERVER_INFO_BASE, previewsEnabled: false, previewBaseHost: "" };
+    const previewInfo = {
+      ...SERVER_INFO_BASE,
+      previewsEnabled: true,
+      previewBaseHost: "preview.example.com",
+    };
+
+    it("shows a URL selector dropdown with saved URLs and Dev server option", async () => {
+      useDashboardStore.setState({ projects: [PROJECT], projectUrls: { 1: SAVED_URLS } });
+      stubFetch((url) => {
+        const s = String(url);
+        if (s === "/api/projects/1/urls") return Promise.resolve(jsonResponse(200, SAVED_URLS));
+        if (s === "/api/server-info") return Promise.resolve(jsonResponse(200, noPreviewInfo));
+        return Promise.reject(new Error(`unhandled: ${s}`));
+      });
+
+      render(<BrowserPanel params={{ projectId: 1 }} />);
+      await screen.findByTitle("Preview");
+      await userEvent.setup().click(screen.getByText("Dev server"));
+
+      expect(await screen.findByText("Staging")).toBeInTheDocument();
+      expect(await screen.findByText("CI")).toBeInTheDocument();
+      expect(await screen.findByText("Manage URLs…")).toBeInTheDocument();
+    });
+
+    it("shows a favorited star indicator on saved URLs that are favorited", async () => {
+      useDashboardStore.setState({ projects: [PROJECT], projectUrls: { 1: SAVED_URLS } });
+      stubFetch((url) => {
+        const s = String(url);
+        if (s === "/api/projects/1/urls") return Promise.resolve(jsonResponse(200, SAVED_URLS));
+        if (s === "/api/server-info") return Promise.resolve(jsonResponse(200, noPreviewInfo));
+        return Promise.reject(new Error(`unhandled: ${s}`));
+      });
+
+      render(<BrowserPanel params={{ projectId: 1 }} />);
+      await screen.findByTitle("Preview");
+      await userEvent.setup().click(screen.getByText("Dev server"));
+
+      await screen.findByText("Staging");
+      // Only Staging (favorite: true) has a star
+      const stars = document.querySelectorAll(".browser-panel-dropdown-star");
+      expect(stars.length).toBe(1);
+    });
+
+    it("clicking a saved URL creates an external preview and navigates the iframe", async () => {
+      const savedUrls = SAVED_URLS.slice(0, 1);
+      useDashboardStore.setState({ projects: [PROJECT], projectUrls: { 1: savedUrls } });
+      let externalCallCount = 0;
+      stubFetch((input, init) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url === "/api/projects/1/urls") return Promise.resolve(jsonResponse(200, savedUrls));
+        if (url === "/api/server-info" && method === "GET") {
+          return Promise.resolve(jsonResponse(200, previewInfo));
+        }
+        if (url === "/api/previews" && method === "POST") {
+          const body = JSON.parse(String(init?.body)) as { kind?: string; url?: string };
+          if (body.kind === "external") {
+            externalCallCount += 1;
+            const slug = `slug-ext-${externalCallCount}`;
+            return Promise.resolve(
+              jsonResponse(201, {
+                slug,
+                kind: "external",
+                projectId: null,
+                externalUrl: body.url,
+                createdAt: "2026-01-01T00:00:00.000Z",
+              }),
+            );
+          }
+          return Promise.resolve(
+            jsonResponse(201, {
+              slug: "slug-proj",
+              kind: "project",
+              projectId: 1,
+              externalUrl: null,
+              createdAt: "2026-01-01T00:00:00.000Z",
+            }),
+          );
+        }
+        return Promise.reject(new Error(`unhandled: ${method} ${url}`));
+      });
+
+      const user = userEvent.setup();
+      render(<BrowserPanel params={{ projectId: 1 }} />);
+      await screen.findByTitle("Preview");
+
+      await user.click(screen.getByText("Dev server"));
+      await screen.findByText("Staging");
+      await user.click(screen.getByText("Staging"));
+
+      await vi.waitFor(() => expect(externalCallCount).toBe(1));
+      const frame = screen.getByTitle("Preview");
+      expect(frame).toHaveAttribute(
+        "src",
+        `${window.location.protocol}//preview-slug-ext-1.preview.example.com/`,
       );
     });
   });
