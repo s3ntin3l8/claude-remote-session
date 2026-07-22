@@ -97,6 +97,7 @@ export function startGitHubPRPoller(app: FastifyInstance): () => void {
         );
       }
     }, i * STARTUP_STAGGER_MS);
+    t.unref();
     initialTimers.push(t);
   }
 
@@ -109,6 +110,7 @@ export function startGitHubPRPoller(app: FastifyInstance): () => void {
     interval = setInterval(pollOnce, POLL_INTERVAL_MS);
     interval.unref();
   }, longestDelay + margin);
+  sweepTimer.unref();
 
   return () => {
     for (const t of initialTimers) clearTimeout(t);

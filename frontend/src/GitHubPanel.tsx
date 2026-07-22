@@ -164,6 +164,26 @@ export function GitHubPanel({ params }: { params: GitHubPanelParams }) {
         </div>
       )}
 
+      {/* Fallback when PR poller cache is empty (cold-start, remote-hosted
+          Phase 1 skip) but the live /github endpoint has PRs. */}
+      {!prsStatus && status && status.pulls.length > 0 && (
+        <div className="github-panel-section">
+          <div className="github-panel-section-title">Pull requests ({status.openPRs})</div>
+          {status.pulls.map((pr) => (
+            <a
+              key={pr.number}
+              className="github-panel-row"
+              href={pr.htmlUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span className="github-panel-row-number">#{pr.number}</span>
+              <span className="github-panel-row-title">{pr.title}</span>
+            </a>
+          ))}
+        </div>
+      )}
+
       {status && (
         <div className="github-panel-section">
           <div className="github-panel-section-title">Issues ({status.openIssues})</div>
@@ -185,12 +205,13 @@ export function GitHubPanel({ params }: { params: GitHubPanelParams }) {
         </div>
       )}
 
-      {prsStatus && prsStatus.prs.length === 0 && status?.pulls.length === 0 && (
-        <div className="github-panel-section">
-          <div className="github-panel-section-title">Pull requests (0)</div>
-          <div className="github-panel-empty-row">No open pull requests</div>
-        </div>
-      )}
+      {((prsStatus && prsStatus.prs.length === 0) || (!prsStatus && status)) &&
+        status?.pulls.length === 0 && (
+          <div className="github-panel-section">
+            <div className="github-panel-section-title">Pull requests (0)</div>
+            <div className="github-panel-empty-row">No open pull requests</div>
+          </div>
+        )}
 
       {status && status.actionsRuns.length > 0 && (
         <div className="github-panel-section">
