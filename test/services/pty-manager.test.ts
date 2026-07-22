@@ -312,6 +312,85 @@ describe("PtyManager", () => {
     expect(session.getScrollback().toString().startsWith("\x1b[?1049h")).toBe(true);
   });
 
+  it("still tracks an alt-screen switch when a PTY read splits the escape sequence across two chunks", async () => {
+    // Regression test for a real live desync: two consecutive `onData`
+    // reads landing mid-sequence (e.g. right after "\x1b[?1049") used to
+    // leave `inAltScreen` stuck at its old value forever, since neither
+    // half alone matches ALT_SCREEN_SWITCH. See carryPartialEscape in
+    // attention-detect.ts.
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    fakePtyChildren[0].emitData("TUI starting\x1b[?1049");
+    // Split lands mid-sequence — tracked state must not have flipped yet.
+    expect(session.getScrollback().toString().startsWith(PRIMARY_PREAMBLE)).toBe(true);
+
+    fakePtyChildren[0].emitData("hTUI frame");
+    // The read that completes the sequence must be the one that flips it.
+    expect(session.getScrollback().toString().startsWith("\x1b[?1049h")).toBe(true);
+
+    // And the raw scrollback itself must NOT contain any duplicated bytes
+    // from the carry — it's detection-only, never fed into scrollback.
+    expect(session.getScrollback().toString()).toBe("\x1b[?1049hTUI starting\x1b[?1049hTUI frame");
+  });
+
+  it("still tracks a split mouse-tracking DECSET across two chunks", async () => {
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+
+    fakePtyChildren[0].emitData("enabling tracking\x1b[?100");
+    fakePtyChildren[0].emitData("3h");
+    expect(session.getScrollback().toString().startsWith(`${PRIMARY_PREAMBLE}\x1b[?1003h`)).toBe(
+      true,
+    );
+  });
+
+  it("does not carry a dangling partial escape across a kill()+respawn into the new attach-client's stream", async () => {
+    // Review follow-up on the split-sequence fix above: a stale
+    // detectCarry left over from the OLD attach-client's last chunk must
+    // not be prepended to the NEW attach-client's first chunk after a
+    // respawn — that byte sequence belongs to a stream that's gone.
+    const first = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(first);
+
+    // Leave a dangling partial alt-screen escape uncompleted, then kill.
+    fakePtyChildren[0].emitData("TUI starting\x1b[?1049");
+    fakePtyChildren[0].kill();
+
+    const session = manager.getOrCreate({
+      id: "1",
+      cwd: "/tmp",
+      command: "bash",
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSpawn(session);
+    expect(fakePtyChildren).toHaveLength(2);
+
+    // The new attach-client's first chunk happens to complete what WOULD
+    // have been the old dangling sequence, were it (wrongly) still carried.
+    fakePtyChildren[1].emitData("hfresh shell output");
+    expect(session.getScrollback().toString().startsWith(PRIMARY_PREAMBLE)).toBe(true);
+  });
+
   // Mirrors the alt-screen preamble tests above, for the same class of gap
   // (issue #93): tracked mouse-tracking state, synthesized into the replay
   // preamble so a reconnecting client doesn't silently lose mouse tracking

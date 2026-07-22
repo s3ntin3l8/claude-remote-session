@@ -9,6 +9,7 @@ import {
   classifyActivityFromTitle,
   detectAltScreenSwitch,
   applyMouseModeChanges,
+  carryPartialEscape,
   INITIAL_MOUSE_TRACKING_STATE,
   type MouseTrackingState,
 } from "./attention-detect.js";
@@ -224,6 +225,13 @@ export class Session {
   // ring buffer, silently defaults to no tracking while the real process is
   // never told anything changed).
   private mouseTracking: MouseTrackingState = INITIAL_MOUSE_TRACKING_STATE;
+  // Any unterminated escape-sequence prefix left dangling at the end of the
+  // previous onData chunk (see carryPartialEscape's docstring) — prepended to
+  // the next chunk before re-running detectAltScreenSwitch/
+  // applyMouseModeChanges so a sequence split across a PTY read boundary is
+  // still recognized. Detection-only: never used for scrollback or fan-out,
+  // only for the copy fed to those two detectors.
+  private detectCarry = "";
   // True while a nudgeRedraw() repaint is in flight — see nudgeRedraw()'s
   // suppression window. While set, onData still fans chunks out to live
   // subscribers (a reconnecting client must see the repaint) but does not
@@ -423,9 +431,16 @@ export class Session {
       // suppressScrollback's docstring. Listeners below still get it live.
       if (!this.suppressScrollback) this.pushScrollback(chunk);
 
-      const altScreenSwitch = detectAltScreenSwitch(data);
+      // Prepend any carry from the previous chunk so a `?1049h`/mouse-mode
+      // DECSET split across two PTY reads is still recognized — detection
+      // only, `data`/`chunk` above are untouched (see detectCarry's
+      // docstring; feeding this into scrollback or the fan-out below would
+      // duplicate the carried bytes in the replayed stream).
+      const detectChunk = this.detectCarry + data;
+      const altScreenSwitch = detectAltScreenSwitch(detectChunk);
       if (altScreenSwitch !== null) this.inAltScreen = altScreenSwitch === "alt";
-      this.mouseTracking = applyMouseModeChanges(data, this.mouseTracking);
+      this.mouseTracking = applyMouseModeChanges(detectChunk, this.mouseTracking);
+      this.detectCarry = carryPartialEscape(detectChunk);
 
       // A bell arriving mid-burst was a work-in-progress notification, not a
       // "waiting for input" signal — clear the sticky attention flag. Reads
@@ -461,6 +476,11 @@ export class Session {
       // `this`, not the pty instance), mis-resizing an unrelated process
       // incarnation. See cancelPendingNudge()'s own doc comment.
       this.cancelPendingNudge();
+      // Same reasoning as detectCarry's clear in kill() below — a client can
+      // also die on its own (crash, not an explicit kill()), and this exit
+      // handler is the only place that path passes through before a later
+      // respawn's first chunk arrives.
+      this.detectCarry = "";
       for (const listener of this.exitListeners) listener();
     });
 
@@ -664,6 +684,13 @@ export class Session {
     this.cancelPendingNudge();
     this.ptyProcess?.kill();
     this.ptyProcess = null;
+    // Unlike inAltScreen/mouseTracking (which deliberately persist across a
+    // respawn — they track true, ongoing screen/mouse state), detectCarry is
+    // just a byte-stream artifact of wherever the old attach-client's last
+    // chunk happened to end. It carries no meaning once that stream is gone,
+    // so clear it rather than risk it being misread as a prefix of the new
+    // attach-client's first chunk.
+    this.detectCarry = "";
   }
 
   toInfo(idleThresholdMs: number = IDLE_THRESHOLD_MS): SessionInfo {
