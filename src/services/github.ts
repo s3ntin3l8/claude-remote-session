@@ -7,6 +7,14 @@
 // independently testable).
 
 const GITHUB_API_BASE = "https://api.github.com";
+
+// GitHub repo/owner naming constraints: alphanumeric + hyphens for owners
+// (max 39 chars), plus underscores/periods for repos (max 100 chars).
+// We validate these before using parsed git-remote data in URLs, to satisfy
+// CodeQL's "file-data in outbound request" rule even though
+// encodeURIComponent and the fixed api.github.com base prevent injection.
+const OWNER_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,38}[a-zA-Z0-9])?$/;
+const REPO_RE = /^[a-zA-Z0-9_.-]{1,100}$/;
 const REQUEST_TIMEOUT_MS = 5_000;
 const USER_AGENT = "mullion-session-manager";
 
@@ -341,7 +349,13 @@ interface GitHubWorkflowRunItem {
   head_sha: string;
 }
 
+function validateGitHubRepoRef(owner: string, repo: string): void {
+  if (!OWNER_RE.test(owner)) throw new GitHubApiError(`Invalid GitHub owner: ${owner}`, 400);
+  if (!REPO_RE.test(repo)) throw new GitHubApiError(`Invalid GitHub repo name: ${repo}`, 400);
+}
+
 async function fetchOpenPRs(token: string, owner: string, repo: string): Promise<PROrWithChecks[]> {
+  validateGitHubRepoRef(owner, repo);
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
@@ -385,6 +399,7 @@ async function fetchRunsForHead(
   repo: string,
   headSha: string,
 ): Promise<GitHubActionsRun[]> {
+  validateGitHubRepoRef(owner, repo);
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
@@ -399,6 +414,9 @@ async function fetchRunsForHead(
     if (!runsRes.ok) return [];
     const runsData = (await runsRes.json()) as { workflow_runs?: GitHubWorkflowRunItem[] };
 
+    // GitHub returns these ordered most-recent-first, so the first time a
+    // given name is seen is already its latest run (same assumption the
+    // existing fetchActionsRuns above documents — see line 193).
     const seen = new Set<string>();
     const latest: GitHubActionsRun[] = [];
     for (const run of runsData.workflow_runs ?? []) {
