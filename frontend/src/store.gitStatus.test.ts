@@ -42,7 +42,9 @@ const CLEAN_STATUS: GitStatus = {
   hasConflicts: false,
 };
 
-// Fixture responses keyed by project id, mutated per-test.
+// Fixture responses keyed by project id, mutated per-test. The mock builds a
+// batch response from these per-project entries — projects without an entry
+// are omitted (simulating a transient failure / 503-equivalent).
 let responseByProject: Record<number, () => Response>;
 
 describe("store.refreshGitStatuses (transient-failure last-known-good)", () => {
@@ -50,15 +52,27 @@ describe("store.refreshGitStatuses (transient-failure last-known-good)", () => {
 
   beforeEach(() => {
     responseByProject = {};
-    fetchMock = vi.fn((input: RequestInfo | URL) => {
+    fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      const match = /^\/api\/projects\/(\d+)\/git-status$/.exec(url);
+      const match = /^\/api\/projects\/git-statuses\?ids=([\d,]+)$/.exec(url);
       if (match) {
-        const id = Number(match[1]);
-        const respond = responseByProject[id];
-        return Promise.resolve(respond ? respond() : new Response(null, { status: 204 }));
+        const ids = match[1].split(",").map(Number);
+        const body: Record<string, GitStatus | null> = {};
+        for (const id of ids) {
+          const respond = responseByProject[id];
+          if (respond) {
+            const res = respond();
+            if (res.status === 200) {
+              body[String(id)] = (await res.json()) as GitStatus;
+            } else if (res.status === 204) {
+              body[String(id)] = null;
+            }
+          }
+          // Project omitted from body => transient failure (503-equivalent)
+        }
+        return jsonResponse(200, body);
       }
-      return Promise.reject(new Error(`unhandled fetch in test: ${url}`));
+      throw new Error(`unhandled fetch in test: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
     useDashboardStore.setState({ projects: [PROJECT_1, PROJECT_2], gitStatuses: {} });
@@ -80,17 +94,17 @@ describe("store.refreshGitStatuses (transient-failure last-known-good)", () => {
     expect(useDashboardStore.getState().gitStatuses[1]).toEqual(CLEAN_STATUS);
   });
 
-  it("preserves the previous entry on a transient 503, instead of blanking it to null", async () => {
+  it("preserves the previous entry on a transient failure, instead of blanking it to null", async () => {
     responseByProject[1] = () => jsonResponse(200, CLEAN_STATUS);
     await useDashboardStore.getState().refreshGitStatuses();
     expect(useDashboardStore.getState().gitStatuses[1]).toEqual(CLEAN_STATUS);
 
     // Next tick: git status fails transiently (e.g. index.lock contention).
-    responseByProject[1] = () => jsonResponse(503, { message: "unavailable" });
+    // The batch omits project 1 from the response => the store keeps the
+    // last-known-good status rather than clearing it.
+    delete responseByProject[1];
     await useDashboardStore.getState().refreshGitStatuses();
 
-    // This is the flicker fix: a single failed poll tick must not overwrite
-    // the last-known-good status with null.
     expect(useDashboardStore.getState().gitStatuses[1]).toEqual(CLEAN_STATUS);
   });
 
@@ -99,9 +113,7 @@ describe("store.refreshGitStatuses (transient-failure last-known-good)", () => {
     await useDashboardStore.getState().refreshGitStatuses();
     expect(useDashboardStore.getState().gitStatuses[1]).toEqual(CLEAN_STATUS);
 
-    // Project 1's fetch is the first call `refreshGitStatuses` makes (array
-    // order is preserved by Promise.all(projects.map(...))), so overriding
-    // just the next call reliably targets it.
+    // Entire batch request fails (network down) — no entries are touched.
     fetchMock.mockImplementationOnce(() => Promise.reject(new Error("network down")));
     await useDashboardStore.getState().refreshGitStatuses();
     expect(useDashboardStore.getState().gitStatuses[1]).toEqual(CLEAN_STATUS);
@@ -112,13 +124,30 @@ describe("store.refreshGitStatuses (transient-failure last-known-good)", () => {
     responseByProject[2] = () => jsonResponse(200, CLEAN_STATUS);
     await useDashboardStore.getState().refreshGitStatuses();
 
-    // Project 1 becomes genuinely not-a-repo; project 2's transient failure
-    // must not affect project 1, and project 1's real 204 must still clear.
+    // Project 1 becomes genuinely not-a-repo (null in batch response);
+    // project 2 is omitted (transient failure) — must preserve its previous.
     responseByProject[1] = () => new Response(null, { status: 204 });
-    responseByProject[2] = () => jsonResponse(503, { message: "unavailable" });
+    delete responseByProject[2];
     await useDashboardStore.getState().refreshGitStatuses();
 
     expect(useDashboardStore.getState().gitStatuses[1]).toBeNull();
+    expect(useDashboardStore.getState().gitStatuses[2]).toEqual(CLEAN_STATUS);
+  });
+
+  it("prunes orphaned entries when a project is removed from the list", async () => {
+    responseByProject[1] = () => jsonResponse(200, CLEAN_STATUS);
+    responseByProject[2] = () => jsonResponse(200, CLEAN_STATUS);
+    await useDashboardStore.getState().refreshGitStatuses();
+    expect(useDashboardStore.getState().gitStatuses[1]).toEqual(CLEAN_STATUS);
+    expect(useDashboardStore.getState().gitStatuses[2]).toEqual(CLEAN_STATUS);
+
+    // Remove project 1 from the store's project list to simulate deletion.
+    useDashboardStore.setState({ projects: [PROJECT_2] });
+    await useDashboardStore.getState().refreshGitStatuses();
+
+    // Project 1's stale entry should be pruned since it's no longer in the
+    // project list; project 2's status is still returned by the batch.
+    expect(useDashboardStore.getState().gitStatuses[1]).toBeUndefined();
     expect(useDashboardStore.getState().gitStatuses[2]).toEqual(CLEAN_STATUS);
   });
 
@@ -128,14 +157,14 @@ describe("store.refreshGitStatuses (transient-failure last-known-good)", () => {
 
     // Two calls fired without awaiting the first — simulates a slow tick
     // still in flight when the next tick's call starts. Without dedup, this
-    // would issue 4 fetches (2 projects x 2 overlapping calls); with it,
-    // the second call reuses the first's in-flight promise.
+    // would issue 2 fetches; with it, the second call reuses the first's
+    // in-flight promise.
     const first = useDashboardStore.getState().refreshGitStatuses();
     const second = useDashboardStore.getState().refreshGitStatuses();
     expect(second).toBe(first);
     await Promise.all([first, second]);
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(useDashboardStore.getState().gitStatuses[1]).toEqual(CLEAN_STATUS);
     expect(useDashboardStore.getState().gitStatuses[2]).toEqual(CLEAN_STATUS);
 
@@ -144,6 +173,6 @@ describe("store.refreshGitStatuses (transient-failure last-known-good)", () => {
     const third = useDashboardStore.getState().refreshGitStatuses();
     expect(third).not.toBe(first);
     await third;
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

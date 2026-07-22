@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { projects, sessions } from "../db/schema.js";
 import {
   discoverCandidates,
@@ -336,6 +336,63 @@ export async function projectsRoute(app: FastifyInstance) {
         reply.code(204);
         return;
       }
+    },
+  );
+
+  // Batch git-status for the sidebar's live-refresh loop: replaces N
+  // parallel per-project requests with a single request (issue #76).
+  // Accepts ?ids=1,2,3 and returns a Record<id, GitStatus | null> where
+  // null means "durably not a git repo" (the per-project endpoint's 204
+  // case). Projects whose git status failed transiently (503-equivalent)
+  // are simply omitted from the response, so the frontend preserves its
+  // last-known-good for those. Higher rate limit than the per-project
+  // endpoint since this replaces N requests with 1.
+  app.get<{ Querystring: { ids?: string } }>(
+    "/api/projects/git-statuses",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (request) => {
+      const idsParam = request.query.ids;
+      if (!idsParam) return {};
+      const ids = idsParam
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isInteger(n) && n > 0);
+      if (ids.length === 0) return {};
+
+      const rows = app.db.select().from(projects).where(inArray(projects.id, ids)).all();
+
+      const result: Record<string, GitStatus | null> = {};
+
+      for (const project of rows) {
+        if (project.hostId === LOCAL_HOST_ID) {
+          if (!isGitRepo(project.cwd)) {
+            result[project.id] = null;
+            continue;
+          }
+          const status = await getGitStatus(project.cwd);
+          if (status) {
+            result[project.id] = status;
+          }
+        } else {
+          try {
+            const remoteResult = await getRemoteHostClient(app, project.hostId).resolveGitStatus(
+              project.cwd,
+            );
+            if (!remoteResult.isRepo) {
+              result[project.id] = null;
+            } else if (remoteResult.status) {
+              result[project.id] = remoteResult.status;
+            }
+          } catch (err) {
+            app.log.warn(
+              { hostId: project.hostId, projectId: project.id, err },
+              "batch git-status: remote host unreachable, omitting project",
+            );
+          }
+        }
+      }
+
+      return result;
     },
   );
 

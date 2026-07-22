@@ -397,33 +397,37 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
       void get().refreshGitStatuses();
     },
 
-    // One request per known project, in parallel — the backend caches each
-    // for ~3s server-side (git-status.ts), so this tracks the live-refresh
-    // cadence without re-spawning `git status` on every tick. A single
-    // project's fetch failing (ApiError from a 5xx, or a genuinely
-    // unreachable remote host) preserves that project's *previous* entry
-    // rather than blanking it to null — only the durable "not a repo" (204,
-    // resolved as `undefined` by getProjectGitStatus) actually clears an
-    // entry. Overwriting with null on every transient failure is exactly
-    // what made the sidebar dot flicker green→grey on a single flaky poll
-    // tick; a thrown error now means "unknown this tick", not "nothing to
-    // report".
+    // Batch git-status fetch: replaces N parallel per-project requests with
+    // a single request to GET /api/projects/git-statuses (which replaces N
+    // `git status` shell-outs with one batch that still benefits from the
+    // server-side 5s in-memory cache). Projects whose git status was
+    // transiently unavailable (the per-project endpoint's 503-equivalent)
+    // are omitted from the response, so the frontend preserves its
+    // last-known-good for those — only the durable "not a repo" (the per-
+    // project endpoint's 204-equivalent, returned as a null entry) clears
+    // a previously-known status. If the entire batch request fails
+    // (network error, whole-backend outage), all previous entries are kept.
     refreshGitStatuses: () => {
       if (gitStatusesRefreshInFlight) return gitStatusesRefreshInFlight;
 
       const run = async () => {
-        const previous = get().gitStatuses;
-        const entries = await Promise.all(
-          get().projects.map(async (project) => {
-            try {
-              const status = await api.getProjectGitStatus(project.id);
-              return [project.id, status ?? null] as const;
-            } catch {
-              return [project.id, previous[project.id] ?? null] as const;
-            }
-          }),
-        );
-        set({ gitStatuses: Object.fromEntries(entries) });
+        const projectIds = get().projects.map((p) => p.id);
+        if (projectIds.length === 0) {
+          set({ gitStatuses: {} });
+          return;
+        }
+
+        try {
+          const statuses = await api.getProjectGitStatuses(projectIds);
+          set({
+            gitStatuses: {
+              ...Object.fromEntries(projectIds.map((id) => [id, get().gitStatuses[id] ?? null])),
+              ...statuses,
+            },
+          });
+        } catch (err) {
+          console.warn("[GitPanel] refreshGitStatuses batch failed", err);
+        }
       };
 
       gitStatusesRefreshInFlight = run().finally(() => {

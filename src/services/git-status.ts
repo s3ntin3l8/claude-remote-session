@@ -1,6 +1,7 @@
 import { spawn as spawnChild } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { gitEnv } from "./git-env.js";
 
 // The repo's first `git` CLI shell-out (issue #76) — everything else that
 // reads git state (git-remote.ts, git-branch.ts) is a pure filesystem read.
@@ -58,6 +59,7 @@ function runGitStatus(cwd: string): Promise<string | null> {
     let settled = false;
     const child = spawnChild("git", ["-C", cwd, "status", "--porcelain=v2", "--branch"], {
       stdio: ["ignore", "pipe", "pipe"],
+      env: gitEnv(),
     });
 
     const finish = (value: string | null) => {
@@ -193,13 +195,14 @@ function classifyXY(xy: string): GitFileStatusCode {
 }
 
 /** In-memory `{ cwd → { ts, result } }` cache, mirroring
- * remote-host-client.ts's bulkLiveStatus cache shape — a ~3s TTL (issue
- * #76) so the sidebar's live-refresh poll and an open GitPanel don't each
- * pay for their own `git status` shell-out on every tick. Concurrent misses
- * on the same cwd (a poll tick landing mid-flight of another caller's
+ * remote-host-client.ts's bulkLiveStatus cache shape — a ~5s TTL (issue
+ * #76, raised from 3s in #166 to span the frontend's 4s live-refresh
+ * interval so the batch endpoint and an open GitPanel don't each pay for
+ * their own `git status` shell-out on every tick). Concurrent misses on
+ * the same cwd (a poll tick landing mid-flight of another caller's
  * request) share one child process rather than each spawning their own,
  * same as bulkLiveStatus's in-flight dedup. */
-const CACHE_TTL_MS = 3_000;
+const CACHE_TTL_MS = 5_000;
 const cache = new Map<string, { ts: number; result: GitStatus | null }>();
 const inFlight = new Map<string, Promise<GitStatus | null>>();
 

@@ -526,6 +526,15 @@ export const api = {
   getProjectGitStatus: (projectId: number) =>
     request<GitStatus | undefined>(`/api/projects/${projectId}/git-status`),
 
+  // Batch git-status for the sidebar's live-refresh loop: replaces N
+  // parallel per-project requests with a single request. Returns a map of
+  // project id → status; projects whose git status was transiently
+  // unavailable (503-equivalent on the per-project endpoint) are simply
+  // omitted, letting the caller keep last-known-good for those. Null means
+  // "durably not a git repo" (the per-project endpoint's 204 case).
+  getProjectGitStatuses: (ids: number[]) =>
+    request<Record<string, GitStatus | null>>(`/api/projects/git-statuses?ids=${ids.join(",")}`),
+
   // undefined for the 204 "not applicable" response (see GitBranchesResult
   // above).
   getProjectGitBranches: (projectId: number) =>
