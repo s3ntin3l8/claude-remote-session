@@ -212,7 +212,8 @@ export async function getGitStatus(cwd: string): Promise<GitStatus | null> {
 
   const promise = runGitStatus(cwd)
     .then((output) => {
-      const result = output === null ? null : parsePorcelainV2(output);
+      if (output === null) return null;
+      const result = parsePorcelainV2(output);
       cache.set(cwd, { ts: Date.now(), result });
       return result;
     })
