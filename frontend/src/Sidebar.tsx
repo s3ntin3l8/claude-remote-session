@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDashboardStore } from "./store.js";
 import { ConfirmButton } from "./ConfirmButton.js";
 import { CreateProjectModal } from "./CreateProjectModal.js";
@@ -9,6 +9,7 @@ import type {
   GitHubCiStatus,
   GitStatus,
   Host,
+  NotificationEvent,
   Project,
   Session,
 } from "./api.js";
@@ -373,6 +374,56 @@ function sessionPrDotClass(status: GitHubCiStatus): "good" | "bad" | "pending" |
   return "none";
 }
 
+interface FileChangeSummary {
+  path: string;
+  action: "modify" | "create" | "delete";
+  count: number;
+  lastSeq: number;
+}
+
+const FILE_CHANGE_MAX_SHOWN = 5;
+
+// Row 4 (issue #177) — collapses this session's raw `file_change` hook
+// events (see eventDescriptions.ts's own file_change case for the payload
+// shape) into one summary per path: the most recent action wins, `count`
+// is how many times that path was touched recently. `events` is
+// oldest-first (store.ts's addEvent), so a single forward scan naturally
+// leaves the latest action/seq in place with no extra sort-then-scan step.
+function summarizeFileChanges(events: NotificationEvent[] | undefined): FileChangeSummary[] {
+  if (!events) return [];
+  const byPath = new Map<string, FileChangeSummary>();
+  for (const event of events) {
+    if (event.kind !== "file_change") continue;
+    const path = typeof event.payload.path === "string" ? event.payload.path : null;
+    const action = event.payload.action;
+    if (!path || (action !== "modify" && action !== "create" && action !== "delete")) continue;
+    const existing = byPath.get(path);
+    if (existing) {
+      existing.action = action;
+      existing.count += 1;
+      existing.lastSeq = event.seq;
+    } else {
+      byPath.set(path, { path, action, count: 1, lastSeq: event.seq });
+    }
+  }
+  return Array.from(byPath.values()).sort((a, b) => b.lastSeq - a.lastSeq);
+}
+
+// Reuses the same letter+dot language as GitPanel.tsx's own per-file status
+// badges (create/A -> good, delete/D -> bad, modify/M -> pending) rather
+// than inventing a fourth dot vocabulary for this one strip.
+function fileChangeDotClass(action: FileChangeSummary["action"]): "good" | "bad" | "pending" {
+  if (action === "create") return "good";
+  if (action === "delete") return "bad";
+  return "pending";
+}
+
+function fileChangeLetter(action: FileChangeSummary["action"]): "A" | "D" | "M" {
+  if (action === "create") return "A";
+  if (action === "delete") return "D";
+  return "M";
+}
+
 export function SessionRow({
   session,
   project,
@@ -394,6 +445,17 @@ export function SessionRow({
   const eventLine = describeLatestEvent(sessionEvents);
   const agentLogo = resolveAgentLogo(session.command, theme);
   const agentBinary = commandToBinary(session.command);
+
+  // Row 4 (issue #177) — recent file changes, derived from the same
+  // sessionEvents slice as row 2's eventLine above (no separate fetch).
+  const fileChanges = useMemo(
+    () => summarizeFileChanges(sessionEvents).slice(0, FILE_CHANGE_MAX_SHOWN),
+    [sessionEvents],
+  );
+  const [expandedFilePath, setExpandedFilePath] = useState<string | null>(null);
+  const expandedFileChange = expandedFilePath
+    ? fileChanges.find((fc) => fc.path === expandedFilePath)
+    : undefined;
 
   // Row 3's data (issue #202) — worktree/branch/PR/diff-stats. Selector-based
   // per field (not one selector returning an object) so a live update to a
@@ -591,6 +653,49 @@ export function SessionRow({
               <span className="session-git-del">-{diffStats.deletions}</span>
             </span>
           )}
+        </div>
+      )}
+      {/* Row 4 (issue #177) — recent file changes from the structured hook
+          channel (Phase 2), not the git working-tree diff row 3 shows above.
+          Always visible once there's at least one file_change event, same
+          ungated posture as row 2 — not nested inside the git-details
+          toggle, since an agent can emit these without the session's cwd
+          even being a git repo. */}
+      {fileChanges.length > 0 && (
+        <div className="session-file-changes-line">
+          {fileChanges.map((fc) => {
+            const filename = fc.path.split("/").pop() || fc.path;
+            return (
+              <button
+                key={fc.path}
+                type="button"
+                className="session-file-change-chip"
+                title={fc.path}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setExpandedFilePath((prev) => (prev === fc.path ? null : fc.path));
+                }}
+              >
+                <span className={`github-panel-ci-dot ${fileChangeDotClass(fc.action)}`} />
+                <span className="session-file-change-letter">{fileChangeLetter(fc.action)}</span>
+                <span className="session-file-change-name">{filename}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {/* Click-to-expand detail (issue #177's explicit scope: path + action
+          + occurrence count, no actual diff content — see the follow-up
+          issue filed alongside this PR for real diff rendering). */}
+      {expandedFileChange && (
+        <div className="session-file-change-detail" onClick={(e) => e.stopPropagation()}>
+          <span className="session-file-change-detail-path" title={expandedFileChange.path}>
+            {expandedFileChange.path}
+          </span>
+          <span className="session-file-change-detail-meta">
+            {fileChangeLetter(expandedFileChange.action)} · {expandedFileChange.count} change
+            {expandedFileChange.count === 1 ? "" : "s"}
+          </span>
         </div>
       )}
     </div>
