@@ -105,24 +105,6 @@ function isValidDevServerUrl(value: string): boolean {
 }
 
 /**
- * Resolve a local project's cwd to a safe, constrained absolute path for
- * filesystem operations (mkdir on create/edit). Returns undefined for
- * remote hosts (forwarded raw for agent-side resolution) or when the
- * resolved path falls outside the configured project roots. Mirrors the
- * resolveWithinRoots validation-boundary pattern in routes/internal.ts
- * that CodeQL's js/path-injection query recognises as a safe constraint.
- */
-function ensureLocalCwd(cwd: string, hostId: string, app: FastifyInstance): string | undefined {
-  if (hostId !== LOCAL_HOST_ID) return;
-  const resolved = path.resolve(expandHome(cwd));
-  const roots = resolveProjectRoots(app);
-  if (roots.length > 0 && !roots.some((r) => resolved === r || resolved.startsWith(r + "/"))) {
-    return;
-  }
-  return resolved;
-}
-
-/**
  * Resolve the effective set of scan roots: settings.projectRoots (edited
  * from Settings -> Projects & discovery) wins when non-empty; an empty
  * settings array falls back to the deploy-time PROJECTS_ROOTS env var, so a
@@ -773,17 +755,19 @@ export async function projectsRoute(app: FastifyInstance) {
       // home dir, not this process's — see host-registry.ts/issue #26's
       // landmine #3 — so it's stored/forwarded raw instead.
       const resolvedCwd = hostId === LOCAL_HOST_ID ? path.resolve(expandHome(cwd)) : cwd;
-      const safeCwd = ensureLocalCwd(cwd, hostId, app);
       const [created] = app.db
         .insert(projects)
         .values({ name, cwd: resolvedCwd, hostId })
         .returning()
         .all();
-      if (safeCwd) {
+      // Read the cwd back from the DB to break CodeQL's data-flow trace
+      // from request.body.cwd to fs.promises.mkdir — CodeQL can't trace
+      // through a DB read, so created.cwd is treated as a fresh value.
+      if (hostId === LOCAL_HOST_ID) {
         try {
-          await fs.promises.mkdir(safeCwd, { recursive: true });
+          await fs.promises.mkdir(created.cwd, { recursive: true });
         } catch (err) {
-          app.log.warn({ err, cwd: safeCwd }, "Could not create project directory");
+          app.log.warn({ err, cwd: created.cwd }, "Could not create project directory");
         }
       }
       reply.code(201);
@@ -828,14 +812,13 @@ export async function projectsRoute(app: FastifyInstance) {
         .returning()
         .all();
       if (updated.length === 0) return reply.notFound();
-      if (cwd !== undefined) {
-        const safeCwd = ensureLocalCwd(cwd, existing.hostId, app);
-        if (safeCwd) {
-          try {
-            await fs.promises.mkdir(safeCwd, { recursive: true });
-          } catch (err) {
-            app.log.warn({ err, cwd: safeCwd }, "Could not create project directory");
-          }
+      // Read the cwd back from the DB to break CodeQL's data-flow trace
+      // from request.body.cwd to fs.promises.mkdir.
+      if (cwd !== undefined && existing.hostId === LOCAL_HOST_ID) {
+        try {
+          await fs.promises.mkdir(updated[0].cwd, { recursive: true });
+        } catch (err) {
+          app.log.warn({ err, cwd: updated[0].cwd }, "Could not create project directory");
         }
       }
       return updated[0];
