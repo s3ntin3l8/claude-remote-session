@@ -21,6 +21,13 @@
 // Deliberately NOT stripped: generic vars a child program may legitimately
 // rely on regardless of which Mullion process started it — PATH, HOME,
 // SHELL, TERM, LOG_LEVEL, and friends.
+// MULLION_HOOK_SOCKET/MULLION_HOOK_TOKEN (Phase 2, issue #172) are injected
+// into a session's env deliberately, per-session, *after* buildSessionEnv()
+// returns — see pty-manager.ts's bootstrapMaster(). They're listed here too
+// so a *nested* Mullion (a `make dev` run from inside a session that itself
+// has hooks enabled) doesn't inherit the outer session's socket path/token
+// and mistake it for its own: the same env-leak class buildSessionEnv()
+// exists to prevent for every other Mullion-owned config key.
 export const SERVER_ENV_KEYS = [
   "PORT",
   "DATABASE_URL",
@@ -44,6 +51,8 @@ export const SERVER_ENV_KEYS = [
   "MULLION_OIDC_REDIRECT_URI",
   "MULLION_HOME",
   "MULLION_UPDATE_REPO",
+  "MULLION_HOOK_SOCKET",
+  "MULLION_HOOK_TOKEN",
   "NODE_ENV",
 ] as const;
 

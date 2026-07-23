@@ -103,7 +103,9 @@ curl localhost:3000/api/projects
   built frontend once it exists), `preview-proxy` (the subdomain reverse
   proxy + HMR websocket proxying for browser previews — see
   [`docs/browser-previews.md`](docs/browser-previews.md); fully inert until
-  `PREVIEW_BASE_HOST` is set).
+  `PREVIEW_BASE_HOST` is set), `hooks` (`app.hookServer` — the Phase 2 agent
+  hook socket, `MULLION_HOOK_SOCKET` injected per-session; see
+  [`docs/agent-hooks.md`](docs/agent-hooks.md)).
 - `src/routes/` — `health` (`/health`, `/ready`), `auth` (`/api/auth/login`,
   `/logout`, `/me`, and `/oidc/login`, `/oidc/callback` — see
   [`docs/auth.md`](docs/auth.md)), `users` (template-inherited example
@@ -142,7 +144,8 @@ curl localhost:3000/api/projects
   [`multi-host.md`](docs/multi-host.md),
   [`browser-previews.md`](docs/browser-previews.md),
   [`github-integration.md`](docs/github-integration.md),
-  [`auth.md`](docs/auth.md).
+  [`auth.md`](docs/auth.md),
+  [`agent-hooks.md`](docs/agent-hooks.md).
 
 ## 🔧 Configuration
 

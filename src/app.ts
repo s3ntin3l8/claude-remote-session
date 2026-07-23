@@ -5,6 +5,7 @@ import { loggingPlugin } from "./plugins/logging.js";
 import { securityPlugin } from "./plugins/security.js";
 import { dbPlugin } from "./plugins/db.js";
 import { ptyPlugin } from "./plugins/pty.js";
+import { hooksPlugin } from "./plugins/hooks.js";
 import { githubPRPollerPlugin } from "./plugins/github-pr-poller.js";
 import { websocketPlugin } from "./plugins/websocket.js";
 import { authPlugin } from "./plugins/auth.js";
@@ -102,8 +103,12 @@ export async function buildApp() {
     // and every DB-backed product route are deliberately skipped. ptyPlugin
     // still registers (an agent's whole job is running PtyManager locally),
     // but with no dbPlugin registered first, its reconciler gate (see
-    // src/plugins/pty.ts) must never touch app.db.
+    // src/plugins/pty.ts) must never touch app.db. hooksPlugin registers
+    // here too (issue #172): an agent spawns hook-emitting sessions exactly
+    // like the primary does, and hooksPlugin only reads app.pty, never
+    // app.db, so it has no role-specific gate at all.
     await app.register(ptyPlugin);
+    await app.register(hooksPlugin);
     await app.register(websocketPlugin);
     await app.register(healthRoute);
     await app.register(internalRoutes);
@@ -114,6 +119,10 @@ export async function buildApp() {
   // app.db (via getStoredSettings) as soon as it's registered.
   await app.register(dbPlugin);
   await app.register(ptyPlugin);
+  // hooksPlugin must register after ptyPlugin: it reads app.pty.hookSocketPath
+  // and app.pty.resolveToken(), both only available once ptyPlugin has
+  // decorated app.pty.
+  await app.register(hooksPlugin);
   await app.register(githubPRPollerPlugin);
   await app.register(websocketPlugin);
   // authPlugin must register before previewProxyPlugin: both install a

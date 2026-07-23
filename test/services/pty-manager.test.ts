@@ -1366,4 +1366,120 @@ describe("PtyManager", () => {
       expect(session.toInfo().lastTitle).toBe("waiting for input");
     });
   });
+
+  describe("hook socket (issue #172)", () => {
+    it("exposes one shared hookSocketPath under sessionsDir", () => {
+      expect(manager.hookSocketPath).toBe(path.join(sessionsDir, "hooks.sock"));
+    });
+
+    it("gives each session its own hookToken", async () => {
+      const a = manager.getOrCreate({ id: "1", cwd: "/tmp", command: "bash", cols: 80, rows: 24 });
+      const b = manager.getOrCreate({ id: "2", cwd: "/tmp", command: "bash", cols: 80, rows: 24 });
+      await waitForSpawn(a);
+      await waitForSpawn(b);
+
+      expect(a.hookToken).toEqual(expect.any(String));
+      expect(a.hookToken.length).toBeGreaterThan(0);
+      expect(a.hookToken).not.toBe(b.hookToken);
+      // Every session shares the same socket path — only the token
+      // disambiguates messages on it.
+      expect(a.hookSocketPath).toBe(manager.hookSocketPath);
+      expect(b.hookSocketPath).toBe(manager.hookSocketPath);
+    });
+
+    it("injects MULLION_HOOK_SOCKET/MULLION_HOOK_TOKEN into the master bootstrap env", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      expect(vi.mocked(spawnChildProcess)).toHaveBeenCalledWith(
+        "systemd-run",
+        expect.arrayContaining(["dtach", "-n", expect.any(String)]),
+        expect.objectContaining({
+          cwd: "/tmp",
+          env: expect.objectContaining({
+            MULLION_HOOK_SOCKET: manager.hookSocketPath,
+            MULLION_HOOK_TOKEN: session.hookToken,
+          }),
+          stdio: "ignore",
+        }),
+      );
+    });
+
+    it("resolveToken() resolves a live session's token to its id", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      expect(manager.resolveToken(session.hookToken)).toBe("1");
+    });
+
+    it("resolveToken() returns undefined for an unknown/forged token", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      expect(manager.resolveToken("not-a-real-token")).toBeUndefined();
+      // Same length as a real token but wrong content — exercises the
+      // timingSafeTokenMatch path rather than the length-mismatch fast-path.
+      expect(manager.resolveToken("0".repeat(session.hookToken.length))).toBeUndefined();
+    });
+
+    it("resolveToken() no longer resolves a token once its session is killed", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+      const token = session.hookToken;
+
+      manager.kill("1");
+
+      expect(manager.resolveToken(token)).toBeUndefined();
+    });
+
+    it("a respawned session (after kill) gets a fresh token, and only the fresh one resolves", async () => {
+      const first = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(first);
+      const oldToken = first.hookToken;
+
+      manager.kill("1");
+      const second = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(second);
+
+      expect(second.hookToken).not.toBe(oldToken);
+      expect(manager.resolveToken(oldToken)).toBeUndefined();
+      expect(manager.resolveToken(second.hookToken)).toBe("1");
+    });
+  });
 });

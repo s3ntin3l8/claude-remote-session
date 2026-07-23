@@ -69,6 +69,25 @@ describe("session-env", () => {
       }
     });
 
+    it("strips MULLION_HOOK_SOCKET/MULLION_HOOK_TOKEN (issue #172) so a nested Mullion re-scrubs them", () => {
+      // These two are injected into a session's env deliberately, per-session,
+      // by pty-manager.ts AFTER buildSessionEnv() returns — listed in
+      // SERVER_ENV_KEYS purely so a *nested* Mullion (a `make dev` run from
+      // inside a session that itself has hooks enabled) doesn't inherit the
+      // outer session's socket path/token as if it were its own.
+      const base: NodeJS.ProcessEnv = {
+        PATH: "/usr/bin",
+        MULLION_HOOK_SOCKET: "/data/sessions/hooks.sock",
+        MULLION_HOOK_TOKEN: "leaked-token",
+      };
+
+      const result = buildSessionEnv(base);
+
+      expect(result).not.toHaveProperty("MULLION_HOOK_SOCKET");
+      expect(result).not.toHaveProperty("MULLION_HOOK_TOKEN");
+      expect(result.PATH).toBe("/usr/bin");
+    });
+
     it("realistic case: a production-inherited env is fully scrubbed of Mullion config", () => {
       const inherited: NodeJS.ProcessEnv = {
         PATH: "/usr/bin:/bin",

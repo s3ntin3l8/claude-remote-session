@@ -4,6 +4,8 @@ import { mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
+import crypto from "node:crypto";
+import { timingSafeTokenMatch } from "./crypto-utils.js";
 import {
   detectAttentionSignals,
   classifyActivityFromTitle,
@@ -266,6 +268,22 @@ export class Session {
   readonly command: string;
   readonly socketPath: string;
   readonly createdAt: number;
+  // Phase 2 (issue #172): a per-session, high-entropy secret disambiguating
+  // this session's hook messages on the ONE shared hook socket every session
+  // connects to (see PtyManager.hookSocketPath below) — hook authors aren't
+  // meant to know or guess another session's token. Generated once at
+  // construction, injected into this session's own env (bootstrapMaster()
+  // below), and never persisted or logged. Not a defense against this
+  // session's own children forging messages (they inherit it, same as any
+  // other env var) — only against a *different* session on the same shared
+  // socket impersonating this one.
+  readonly hookToken: string;
+  // The shared hook-socket path every session (and PtyManager's own
+  // src/plugins/hooks.ts listener) uses — same value for every session in
+  // this process, unlike hookToken above. Passed in from PtyManager rather
+  // than derived locally so there's exactly one source of truth for it (see
+  // PtyManager.hookSocketPath).
+  readonly hookSocketPath: string;
 
   private ptyProcess: IPty | null = null;
   private cols: number;
@@ -357,6 +375,7 @@ export class Session {
     socketPath: string;
     cols: number;
     rows: number;
+    hookSocketPath: string;
   }) {
     this.id = opts.id;
     this.cwd = opts.cwd;
@@ -365,6 +384,12 @@ export class Session {
     this.cols = opts.cols;
     this.rows = opts.rows;
     this.createdAt = Date.now();
+    this.hookSocketPath = opts.hookSocketPath;
+    // 24 random bytes -> 48 hex chars: same order of magnitude as the
+    // MULLION_AGENT_TOKEN/MULLION_AUTH_TOKEN guidance elsewhere in this repo
+    // (openssl rand -hex 32), generated in-process here since this is a
+    // per-session, ephemeral secret rather than an operator-configured one.
+    this.hookToken = crypto.randomBytes(24).toString("hex");
     // Computed once here (rather than re-parsed on every emitEvent() call)
     // and guarded: session ids are DB-issued numeric strings by domain
     // contract, but NotificationEvent.sessionId is typed as `number`, so an
@@ -453,6 +478,14 @@ export class Session {
     // e.g. a `make dev` run from inside this session must not see this
     // process's PORT/DATABASE_URL (issue #70). See session-env.ts.
     const sessionEnv = buildSessionEnv();
+    // Phase 2 (issue #172): injected AFTER the scrub above (not before), so
+    // this session's own hook socket/token survive it — SERVER_ENV_KEYS lists
+    // both purely so a *nested* Mullion re-scrubs them from ITS OWN sessions,
+    // not so buildSessionEnv() strips them from this one. An agent that
+    // ignores these two vars is completely unaffected: the socket exists but
+    // nothing ever connects.
+    sessionEnv.MULLION_HOOK_SOCKET = this.hookSocketPath;
+    sessionEnv.MULLION_HOOK_TOKEN = this.hookToken;
 
     return new Promise((resolve, reject) => {
       // Wrapped in a transient `systemd --user` scope so the master lands
@@ -1031,6 +1064,19 @@ export class Session {
 export class PtyManager {
   private sessions = new Map<string, Session>();
   private readonly sessionsDir: string;
+  // Phase 2 (issue #172) — the ONE shared Unix socket every session in this
+  // process is told about via MULLION_HOOK_SOCKET (see Session.bootstrapMaster()),
+  // and the socket src/plugins/hooks.ts's listener actually binds. Computed
+  // once here, alongside sessionsDir, rather than re-derived per session.
+  readonly hookSocketPath: string;
+  // Phase 2 (issue #172) — token -> session id, populated as each Session is
+  // constructed (getOrCreate below) and cleaned up when a session is fully
+  // removed from `sessions` (kill()). Deliberately resolved via a linear scan
+  // + timingSafeTokenMatch (resolveToken below) rather than a plain
+  // Map.get(token) lookup — see the Session.hookToken field doc comment and
+  // crypto-utils.ts's timingSafeTokenMatch for why a constant-time compare
+  // matters even for an already-filesystem-scoped (0600) socket.
+  private hookTokens = new Map<string, string>();
   // Manager-level fan-out (issue #166) — mirrors dataListeners/onData()'s
   // Set<listener> + unsubscribe-closure shape, just one layer up: each
   // Session emits to its OWN eventListeners set (above), and getOrCreate()
@@ -1052,6 +1098,11 @@ export class PtyManager {
     // dtach would look for the socket in the wrong place entirely.
     this.sessionsDir = path.resolve(opts.sessionsDir);
     mkdirSync(this.sessionsDir, { recursive: true });
+    // Lives alongside the per-session dtach sockets in the same directory —
+    // SESSIONS_DIR is already host-local, per-install storage with no other
+    // sanctioned reader, and src/plugins/hooks.ts locks this file down to
+    // 0600 once it starts listening.
+    this.hookSocketPath = path.join(this.sessionsDir, "hooks.sock");
 
     // unref() so this timer alone never keeps the process (or, in tests, a
     // PtyManager instance nobody explicitly tore down) alive — same
@@ -1064,6 +1115,17 @@ export class PtyManager {
 
   private socketPathFor(id: string): string {
     return path.join(this.sessionsDir, `${id}.sock`);
+  }
+
+  /** Resolve a hook-socket handshake token to the session id it belongs to,
+   * or undefined if it matches no currently-tracked session (unknown,
+   * stale/already-killed, or forged). Linear scan + timingSafeTokenMatch
+   * rather than Map.get(token) — see the hookTokens field doc comment. */
+  resolveToken(token: string): string | undefined {
+    for (const [candidate, id] of this.hookTokens) {
+      if (timingSafeTokenMatch(token, candidate)) return id;
+    }
+    return undefined;
   }
 
   /**
@@ -1082,6 +1144,7 @@ export class PtyManager {
         socketPath: this.socketPathFor(opts.id),
         cols: opts.cols,
         rows: opts.rows,
+        hookSocketPath: this.hookSocketPath,
       });
       // Subscribed exactly once, at creation — re-emits every event this
       // brand-new session ever produces into the manager-level fan-out
@@ -1093,6 +1156,9 @@ export class PtyManager {
         for (const listener of this.eventListeners) listener(event);
       });
       this.sessions.set(opts.id, session);
+      // Registered once, at creation, mirroring the onEvent subscription
+      // just above — see resolveToken()/the hookTokens field doc comment.
+      this.hookTokens.set(session.hookToken, opts.id);
     }
     if (!session.isAlive) {
       session.spawn();
@@ -1134,14 +1200,22 @@ export class PtyManager {
 
   /** Kill our tracked attach-client only (detach); the dtach master + program survive. */
   kill(id: string): void {
+    const session = this.sessions.get(id);
     try {
-      this.sessions.get(id)?.kill();
+      session?.kill();
     } catch (err) {
       // Don't let one already-dead process (e.g. ESRCH) abort killAll()'s
       // loop over every other tracked session.
       console.error(`[pty-manager] error killing session ${id}:`, err);
     }
     this.sessions.delete(id);
+    // A killed session's Session object (and its hookToken) is discarded
+    // here — getOrCreate() constructs a brand-new Session, with a brand-new
+    // token, the next time this id is requested. Removing the stale token
+    // now (rather than leaving it resolvable forever) keeps resolveToken()
+    // from matching hook messages against a token no live session still
+    // holds.
+    if (session) this.hookTokens.delete(session.hookToken);
   }
 
   /**
