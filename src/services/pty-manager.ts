@@ -10,8 +10,13 @@ import {
   detectAltScreenSwitch,
   applyMouseModeChanges,
   carryPartialEscape,
+  advanceAttention,
   INITIAL_MOUSE_TRACKING_STATE,
+  INITIAL_ATTENTION_STATE,
   type MouseTrackingState,
+  type AttentionMachineState,
+  type AttentionSignalKind,
+  type AttentionTransition,
 } from "./attention-detect.js";
 import { buildSessionEnv } from "./session-env.js";
 
@@ -66,13 +71,17 @@ export interface SessionInfo {
    * work), else "idle" — a coarse heuristic, not a real "is the program
    * busy" signal. */
   activity: "working" | "idle";
-  /** True once a BEL or OSC 9/777 notification sequence has been observed
-   * without being cleared since — see the attention-clear check in
-   * Session.spawn()'s onData, which treats a bell followed by another chunk
-   * within ATTENTION_CLEAR_WINDOW_MS as a work-in-progress ping rather than
-   * a "waiting for input" signal. */
+  /** True once one of the attention signals in attention-detect.ts's state
+   * machine (BEL, OSC 9/777 notification, a working->idle title transition,
+   * an alt-screen exit, or sustained silence after a work streak) has been
+   * CONFIRMED — i.e. survived its own per-kind debounce window uncontradicted
+   * by further output — without being cleared since. See Session.attentionState
+   * and advanceAttention() in attention-detect.ts for the full state machine
+   * (issue #171/#98) this replaces the old ad-hoc ATTENTION_CLEAR_WINDOW_MS
+   * check with. */
   attention: boolean;
-  /** Ms-epoch of the most recent attention signal, or null if none yet. */
+  /** Ms-epoch this session was last confirmed as needing attention, or null
+   * if never (or since cleared) — Session.attentionState.confirmedAt. */
   attentionAt: number | null;
   /** Payload of the most recent OSC 0/2 title-change sequence — consulted by
    * classifyActivityFromTitle() for a fast-path "working"/"idle" read on
@@ -82,6 +91,31 @@ export interface SessionInfo {
 
 type DataListener = (chunk: Buffer) => void;
 type ExitListener = () => void;
+
+// Phase 1's notification event model (issue #166) — a structured, replayable
+// record of the byte-driven "something happened" moments a session produces,
+// distinct from `SessionInfo`'s poll-derived snapshot fields above. `seq` is
+// per-session and monotonic (starts at 1), not globally unique — a consumer
+// keys read/unread state off (sessionId, seq) together, never seq alone
+// (two different sessions both legitimately have a seq:1). `kind` is
+// deliberately a small closed set for this PR; the roadmap's later phases
+// extend it (`file_change`, `review_gate`, ...) without needing a shape
+// change here. Deliberately does NOT include a `working`/`idle` kind — see
+// Session.onData's own comment on why activity stays poll-derived.
+export interface NotificationEvent {
+  seq: number;
+  sessionId: number;
+  kind: "attention" | "status_change" | "title_change";
+  ts: number;
+  payload: Record<string, unknown>;
+}
+
+type EventListener = (event: NotificationEvent) => void;
+
+// Cap on each session's own event ring buffer — mirrors SCROLLBACK_MAX_BYTES's
+// FIFO-eviction shape (pushScrollback below) but bounded by count rather than
+// bytes, since events are small structured records, not raw terminal bytes.
+const EVENTS_MAX = 100;
 
 // Enough for a healthy amount of scrollback history, not just "the last
 // screen" — raised from the original 256KiB (issue #83) because that cap and
@@ -134,10 +168,38 @@ const NUDGE_REPAINT_GRACE_MS = 500;
 // server-persisted value from Settings -> Notifications & status instead.
 const IDLE_THRESHOLD_MS = 2_000;
 
-// A bell/notification arriving mid-burst (another chunk within this window
-// either side of it) is a work-in-progress ping, not a "waiting for input"
-// signal — see the attention-clear check in Session.spawn()'s onData.
-const ATTENTION_CLEAR_WINDOW_MS = 2_000;
+// A session that was genuinely working (a sustained activity streak — see
+// SUSTAIN_MS below) and then falls silent for at least this long is the
+// #98 "sustained silence after work" attention signal: quiet for long
+// enough after real output that it's more likely waiting on the user than
+// merely between status pings. Deliberately more generous than
+// IDLE_THRESHOLD_MS/STREAK_GAP_MS (which classify the coarse working/idle
+// poll field, expected to flip on ordinary short pauses) — this signal
+// instead feeds attention-detect.ts's state machine (as the zero-threshold
+// "silence" kind — see ATTENTION_CONFIRM_MS's own comment for why), so
+// firing it too eagerly would turn every brief lull into a false "needs
+// attention". Evaluated periodically by Session.tick(), never from onData
+// directly — see ATTENTION_EVAL_INTERVAL_MS below for why this needs its
+// own timer at all.
+const SUSTAINED_SILENCE_MS = 10_000;
+
+// How often PtyManager's own attention-evaluator interval runs
+// Session.tick() across every tracked session — the ONE new timer this PR
+// (#171/#98) adds; see attention-detect.ts's "Attention state machine"
+// comment for why PENDING_ATTENTION -> ATTENTION and the sustained-silence
+// signal above are both fundamentally time-based (no byte arrives at the
+// exact moment silence becomes "confirmed"), unlike every other signal in
+// this file which is driven straight off onData. Mirrors the re-armable
+// setInterval/.unref() shape src/plugins/pty.ts already uses for
+// session-reconciler.ts's 30s exited-session sweep — kept comfortably below
+// ATTENTION_CONFIRM_MS's shortest nonzero threshold (notification's 1s) so
+// a confirmation is never meaningfully delayed past when it's actually due.
+// Deliberately NOT gated behind MULLION_ROLE === "primary" the way the
+// reconciler is (see src/plugins/pty.ts): this evaluator is pure in-memory
+// state, no DB access, and PtyManager itself is constructed on an agent
+// role too — gating it would silently strand every remote-agent session's
+// pending/silent attention signals unconfirmed forever.
+const ATTENTION_EVAL_INTERVAL_MS = 500;
 
 // A gap of at least this long since the previous chunk starts a fresh
 // activity streak — see the streak tracking in onData. Deliberately larger
@@ -196,6 +258,10 @@ function stopScope(id: string): Promise<void> {
 
 export class Session {
   readonly id: string;
+  // Numeric form of `id`, validated once at construction — see the
+  // constructor's guard. Used by emitEvent() instead of re-parsing `id` on
+  // every call.
+  private readonly numericId: number;
   readonly cwd: string;
   readonly command: string;
   readonly socketPath: string;
@@ -247,9 +313,36 @@ export class Session {
   private nudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private dataListeners = new Set<DataListener>();
   private exitListeners = new Set<ExitListener>();
+  private eventListeners = new Set<EventListener>();
+  // This session's own notification-event ring buffer (issue #166) — same
+  // FIFO-eviction shape as scrollback above, capped by count (EVENTS_MAX)
+  // rather than bytes. `eventSeq` is monotonic per-session, never reset or
+  // reused, so a client's read cursor (lastSeenSeq below) only ever needs to
+  // compare against it, never worry about wraparound within a session's
+  // lifetime.
+  private events: NotificationEvent[] = [];
+  private eventSeq = 0;
+  // The read cursor for this session's event stream (issue #166's shared
+  // read/unread primitive future PRs — 1.3's tab badges, 1.4's event feed —
+  // both reuse): unread = events with seq > lastSeenSeq. Advanced only via
+  // markEventsSeen(), driven by a client's "seen" WS message
+  // (routes/events.ts). Starts at 0 so every event a session has ever
+  // produced is initially unread.
+  private lastSeenSeq = 0;
   private lastActivityAt: number | null = null;
   private activityStreakStart: number | null = null;
-  private attentionAt: number | null = null;
+  // The attention state machine's own state (issue #171/#98) — see
+  // advanceAttention() in attention-detect.ts. Replaces the old bare
+  // `attentionAt: number | null` field entirely: `attentionState.confirmedAt`
+  // IS this session's public attentionAt (see toInfo()), folded into the
+  // machine's state so there's only ever one timestamp to keep in sync.
+  private attentionState: AttentionMachineState = INITIAL_ATTENTION_STATE;
+  // Last title-derived working/idle read (classifyActivityFromTitle), kept
+  // ONLY to detect the #98 working->idle TRANSITION (a program that was
+  // working just went idle — "ready for input") — distinct from `activity`
+  // in toInfo(), which recomputes this from scratch on every poll and has
+  // no memory of the previous read.
+  private lastTitleActivity: "working" | "idle" | null = null;
   private lastTitle: string | null = null;
   // Ms-epoch of the last write() call (user keystrokes, plus a couple of
   // automated terminal-protocol replies routed through the same browser->pty
@@ -272,6 +365,17 @@ export class Session {
     this.cols = opts.cols;
     this.rows = opts.rows;
     this.createdAt = Date.now();
+    // Computed once here (rather than re-parsed on every emitEvent() call)
+    // and guarded: session ids are DB-issued numeric strings by domain
+    // contract, but NotificationEvent.sessionId is typed as `number`, so an
+    // unexpected non-numeric id must not silently become NaN deep inside
+    // the event stream — fail loudly at construction instead, where it's
+    // immediately traceable to the caller that passed a bad id.
+    const numericId = Number(this.id);
+    if (Number.isNaN(numericId)) {
+      throw new Error(`Session id must be numeric, got: ${JSON.stringify(this.id)}`);
+    }
+    this.numericId = numericId;
   }
 
   get isAlive(): boolean {
@@ -438,18 +542,28 @@ export class Session {
       // duplicate the carried bytes in the replayed stream).
       const detectChunk = this.detectCarry + data;
       const altScreenSwitch = detectAltScreenSwitch(detectChunk);
-      if (altScreenSwitch !== null) this.inAltScreen = altScreenSwitch === "alt";
-      this.mouseTracking = applyMouseModeChanges(detectChunk, this.mouseTracking);
-      this.detectCarry = carryPartialEscape(detectChunk);
-
-      // A bell arriving mid-burst was a work-in-progress notification, not a
-      // "waiting for input" signal — clear the sticky attention flag. Reads
-      // the PREVIOUS chunk's timestamp, before it's overwritten below.
-      if (this.attentionAt !== null && this.lastActivityAt !== null) {
-        if (Date.now() - this.lastActivityAt < ATTENTION_CLEAR_WINDOW_MS) {
-          this.attentionAt = null;
+      // #98: exiting alt-screen (a TUI/editor closing back to the shell
+      // prompt) is itself an attention candidate — "done, awaiting input".
+      // Only a genuine alt -> primary flip counts, never a chunk that
+      // merely re-asserts a mode already tracked.
+      let altScreenExited = false;
+      if (altScreenSwitch !== null) {
+        // Transition-guarded (issue #166): detectAltScreenSwitch reports the
+        // switch a chunk landed on even when that's the same mode already
+        // tracked (e.g. two back-to-back "enter alt" sequences with no exit
+        // between them, or a chunk that happens to re-assert the current
+        // mode) — only emit a status_change event on a genuine flip, so a
+        // chatty program can't spam this session's 100-slot event ring
+        // buffer with no-op repeats.
+        const nowInAltScreen = altScreenSwitch === "alt";
+        if (nowInAltScreen !== this.inAltScreen) {
+          altScreenExited = this.inAltScreen && !nowInAltScreen;
+          this.inAltScreen = nowInAltScreen;
+          this.emitEvent("status_change", { screen: altScreenSwitch });
         }
       }
+      this.mouseTracking = applyMouseModeChanges(detectChunk, this.mouseTracking);
+      this.detectCarry = carryPartialEscape(detectChunk);
 
       const now = Date.now();
       // A gap longer than STREAK_GAP_MS since the last chunk starts a new
@@ -461,8 +575,47 @@ export class Session {
       this.lastActivityAt = now;
 
       const signals = detectAttentionSignals(data);
-      if (signals.bell || signals.notification) this.attentionAt = Date.now();
-      if (signals.titleChange !== null) this.lastTitle = signals.titleChange;
+
+      // #98: a working->idle TITLE transition ("program that was working
+      // just became idle") is an attention candidate — only on an actual
+      // title CHANGE (matches the de-dup below, and means a session that
+      // never had a "working" title read to transition FROM can't false-fire
+      // on its very first idle title).
+      let titleWentIdle = false;
+      if (signals.titleChange !== null) {
+        if (signals.titleChange !== this.lastTitle) {
+          this.emitEvent("title_change", { title: signals.titleChange });
+          const newTitleActivity = classifyActivityFromTitle(signals.titleChange, this.command);
+          if (this.lastTitleActivity === "working" && newTitleActivity === "idle") {
+            titleWentIdle = true;
+          }
+          if (newTitleActivity !== null) this.lastTitleActivity = newTitleActivity;
+        }
+        this.lastTitle = signals.titleChange;
+      }
+
+      // Attention state machine (issue #171/#98) — feed this chunk's
+      // strongest candidate signal (or, if it carries none, its mere
+      // arrival as plain output) through advanceAttention(). Priority when
+      // more than one signal lands in the SAME chunk (rare but possible —
+      // e.g. a TUI's alt-screen exit and its title flip to idle in one
+      // read): the more deliberate, zero-threshold signals win over a bare
+      // bell, the noisiest of the four and exactly what PENDING_ATTENTION's
+      // debounce exists to tame (see attention-detect.ts).
+      let candidateKind: AttentionSignalKind | null = null;
+      if (altScreenExited) candidateKind = "altScreenExit";
+      else if (titleWentIdle) candidateKind = "titleIdle";
+      else if (signals.notification) candidateKind = "notification";
+      else if (signals.bell) candidateKind = "bell";
+
+      this.applyAttentionTransition(
+        advanceAttention(
+          this.attentionState,
+          candidateKind !== null
+            ? { type: "signal", kind: candidateKind, now }
+            : { type: "output", now },
+        ),
+      );
 
       for (const listener of this.dataListeners) listener(chunk);
     });
@@ -481,6 +634,13 @@ export class Session {
       // handler is the only place that path passes through before a later
       // respawn's first chunk arrives.
       this.detectCarry = "";
+      // Issue #166: mirrors terminal.ts's own onExit handler, which sends a
+      // `{type:"exited"}` control message to every attached browser socket
+      // on this exact same event regardless of whether the client died from
+      // an explicit detach (kill()) or the program genuinely exiting on its
+      // own — same "attach-client death is treated uniformly" posture, kept
+      // consistent here rather than trying to discriminate the two causes.
+      this.emitEvent("status_change", { reason: "exited" });
       for (const listener of this.exitListeners) listener();
     });
 
@@ -573,6 +733,141 @@ export class Session {
       this.nudgeTimer = null;
     }
     if (this.suppressScrollback) this.suppressScrollback = false;
+  }
+
+  /**
+   * Record a notification event into this session's ring buffer and fan it
+   * out to live subscribers (mirrors pushScrollback's FIFO-eviction shape
+   * and dataListeners' fan-out shape respectively). Only ever called from
+   * genuinely byte-driven (or exit-driven) transitions — see onData/onExit
+   * below — or from the attention state machine's own time-based
+   * confirmations (tick(), via applyAttentionTransition() below) — never
+   * from a plain poll, so callers don't need their own dedup: each call
+   * site already only calls this when its own tracked state actually
+   * changed (advanceAttention()'s transition-guards give tick() the same
+   * guarantee onData's other call sites already have).
+   */
+  private emitEvent(kind: NotificationEvent["kind"], payload: Record<string, unknown>): void {
+    this.eventSeq += 1;
+    const event: NotificationEvent = {
+      seq: this.eventSeq,
+      sessionId: this.numericId,
+      kind,
+      ts: Date.now(),
+      payload,
+    };
+    this.events.push(event);
+    if (this.events.length > EVENTS_MAX) this.events.shift();
+    for (const listener of this.eventListeners) listener(event);
+  }
+
+  /**
+   * Apply one advanceAttention() result: adopt the new machine state, turn
+   * any `log` entries into debug lines (the issue's "add debug logging on
+   * attention state transitions" ask — matches this file's existing
+   * console.error(...) logging shape; Session has no Fastify logger to hang
+   * this off, see spawn()'s own console.error call), and turn any `emit`
+   * entries into real emitEvent("attention", ...) calls. The one place
+   * onData/tick() ever touch `this.attentionState` — keeps every call site
+   * from having to duplicate this bookkeeping.
+   */
+  private applyAttentionTransition(transition: AttentionTransition): void {
+    for (const entry of transition.log) {
+      // Skip PENDING_ATTENTION churn (entering it from idle, or being
+      // cancelled back to idle from it without ever confirming) — during
+      // exactly the bursty-signal scenario issue #171 exists to fix, this
+      // is by far the highest-frequency transition, and logging every one
+      // would spam stdout at the same frequency this PR is suppressing
+      // false positives for (console.debug bypasses pino's level filter
+      // entirely — see spawn()'s console.error for why Session logs this
+      // way at all). Only the meaningful edges — a signal actually
+      // CONFIRMING attention, or a confirmed session actually CLEARING
+      // back to idle — are worth a line.
+      const isPendingChurn =
+        entry.to === "pending_attention" ||
+        (entry.from === "pending_attention" && entry.to === "idle");
+      if (isPendingChurn) continue;
+      console.debug(
+        `[pty-manager] session ${this.id} attention: ${entry.from} -> ${entry.to}` +
+          (entry.kind ? ` (${entry.kind})` : ""),
+      );
+    }
+    this.attentionState = transition.next;
+    // Spread into a plain object: AttentionEmit's fixed shape (no index
+    // signature) doesn't structurally satisfy emitEvent's deliberately
+    // loose Record<string, unknown> payload type otherwise.
+    for (const emit of transition.emit) this.emitEvent("attention", { ...emit });
+  }
+
+  /**
+   * The attention state machine's time-based half (issue #171/#98) — called
+   * periodically by PtyManager's own evaluator interval (see
+   * ATTENTION_EVAL_INTERVAL_MS), never from onData. Two independent checks:
+   *
+   * 1. Promote a still-PENDING_ATTENTION signal to ATTENTION once it's gone
+   *    uncontradicted long enough (advanceAttention's "tick" input) — the
+   *    ONLY way a nonzero-threshold signal (bell/notification) ever
+   *    confirms when the program stays genuinely silent afterward; nothing
+   *    byte-driven would ever re-check it.
+   * 2. The #98 "sustained silence after work" signal: a session that had a
+   *    real, sustained activity streak (same `sustained` computation
+   *    toInfo() uses) and has since gone quiet for at least
+   *    SUSTAINED_SILENCE_MS raises a zero-threshold "silence" candidate.
+   *    Gated to `attentionState.state === "idle"` — if a signal is already
+   *    pending or confirmed, that already covers "something's up", and (2)
+   *    running AFTER (1) in the same tick() call means this reads
+   *    already-updated state rather than racing it.
+   *
+   * `now` is a parameter (defaulting to Date.now()) rather than read
+   * unconditionally inside, purely so tests can call this directly with a
+   * synthetic clock instead of needing fake real timers — see
+   * test/services/pty-manager.test.ts.
+   */
+  tick(now: number = Date.now()): void {
+    this.applyAttentionTransition(advanceAttention(this.attentionState, { type: "tick", now }));
+
+    const hadSustainedStreak =
+      this.activityStreakStart !== null &&
+      this.lastActivityAt !== null &&
+      this.lastActivityAt - this.activityStreakStart >= SUSTAIN_MS;
+    const silentLongEnough =
+      this.lastActivityAt !== null && now - this.lastActivityAt >= SUSTAINED_SILENCE_MS;
+
+    if (this.attentionState.state === "idle" && hadSustainedStreak && silentLongEnough) {
+      this.applyAttentionTransition(
+        advanceAttention(this.attentionState, { type: "signal", kind: "silence", now }),
+      );
+    }
+  }
+
+  /** Subscribe to this session's own notification events as they're emitted
+   * — mirrors onData()/onExit()'s Set<listener> + unsubscribe-closure shape.
+   * PtyManager (below) is the only caller: it subscribes once per session
+   * (in getOrCreate) and re-emits through its own manager-level onEvent()
+   * fan-out, the same one-layer-up relationship dataListeners has to
+   * routes/terminal.ts's per-session subscriptions — except here the
+   * manager itself is the aggregation point, not each route call. */
+  onEvent(listener: EventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
+  /** Everything currently buffered for this session, oldest first — replay
+   * this (alongside every other tracked session's own buffer) to a newly
+   * connecting /ws/events client. Mirrors getScrollback()'s "replay on
+   * connect" role, just for structured events instead of raw bytes. */
+  getEvents(): NotificationEvent[] {
+    return [...this.events];
+  }
+
+  /** Advance this session's read cursor to `seq` (a no-op if `seq` is behind
+   * the cursor already — e.g. a duplicate or out-of-order "seen" message).
+   * Never rejects an out-of-range seq outright: a client-supplied cursor
+   * ahead of what this process has ever emitted (e.g. right after a
+   * restart wiped the in-memory ring buffer but the client's own
+   * last-known seq survived) is harmless to just accept. */
+  markEventsSeen(seq: number): void {
+    if (seq > this.lastSeenSeq) this.lastSeenSeq = seq;
   }
 
   private pushScrollback(chunk: Buffer): void {
@@ -726,8 +1021,8 @@ export class Session {
       subscriberCount: this.subscriberCount,
       lastActivityAt: this.lastActivityAt,
       activity,
-      attention: this.attentionAt !== null,
-      attentionAt: this.attentionAt,
+      attention: this.attentionState.confirmedAt !== null,
+      attentionAt: this.attentionState.confirmedAt,
       lastTitle: this.lastTitle,
     };
   }
@@ -736,6 +1031,19 @@ export class Session {
 export class PtyManager {
   private sessions = new Map<string, Session>();
   private readonly sessionsDir: string;
+  // Manager-level fan-out (issue #166) — mirrors dataListeners/onData()'s
+  // Set<listener> + unsubscribe-closure shape, just one layer up: each
+  // Session emits to its OWN eventListeners set (above), and getOrCreate()
+  // below subscribes once per session to re-emit into this aggregated set,
+  // the single subscription point routes/events.ts's /ws/events needs to
+  // see every session's events without subscribing to each one individually.
+  private eventListeners = new Set<EventListener>();
+  // The one new timer this PR (#171/#98) adds — see ATTENTION_EVAL_INTERVAL_MS's
+  // doc comment for why it lives here (unconditionally, not gated behind
+  // MULLION_ROLE like session-reconciler.ts's timer in src/plugins/pty.ts)
+  // rather than as a per-Session timer: one interval regardless of session
+  // count, mirroring the reconciler's own single-timer-for-N-sessions shape.
+  private readonly attentionEvalTimer: ReturnType<typeof setInterval>;
 
   constructor(opts: { sessionsDir: string }) {
     // Must be absolute: dtach is spawned with cwd set to the *session's*
@@ -744,6 +1052,14 @@ export class PtyManager {
     // dtach would look for the socket in the wrong place entirely.
     this.sessionsDir = path.resolve(opts.sessionsDir);
     mkdirSync(this.sessionsDir, { recursive: true });
+
+    // unref() so this timer alone never keeps the process (or, in tests, a
+    // PtyManager instance nobody explicitly tore down) alive — same
+    // reasoning as src/plugins/pty.ts's reconcile timer.
+    this.attentionEvalTimer = setInterval(() => {
+      for (const session of this.sessions.values()) session.tick();
+    }, ATTENTION_EVAL_INTERVAL_MS);
+    this.attentionEvalTimer.unref();
   }
 
   private socketPathFor(id: string): string {
@@ -767,6 +1083,15 @@ export class PtyManager {
         cols: opts.cols,
         rows: opts.rows,
       });
+      // Subscribed exactly once, at creation — re-emits every event this
+      // brand-new session ever produces into the manager-level fan-out
+      // above, for as long as this process runs (never unsubscribed; a
+      // Session's own eventListeners set only otherwise loses subscribers
+      // via a WS route's unsubscribe closure, which this internal one never
+      // is).
+      session.onEvent((event) => {
+        for (const listener of this.eventListeners) listener(event);
+      });
       this.sessions.set(opts.id, session);
     }
     if (!session.isAlive) {
@@ -781,6 +1106,30 @@ export class PtyManager {
 
   list(): SessionInfo[] {
     return [...this.sessions.values()].map((s) => s.toInfo());
+  }
+
+  /** Subscribe to every tracked session's notification events, present and
+   * future — see the eventListeners field doc comment above. Returns an
+   * unsubscribe closure, mirroring every other listener registration in
+   * this file. */
+  onEvent(listener: EventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
+  /** Every currently-buffered event across every tracked session (alive or
+   * not — a session's final `status_change` "exited" event is exactly the
+   * kind of thing a client connecting moments later still wants to see),
+   * unsorted. Callers (routes/events.ts) sort/cap this for replay. */
+  listEvents(): NotificationEvent[] {
+    return [...this.sessions.values()].flatMap((s) => s.getEvents());
+  }
+
+  /** Advance a tracked session's read cursor — a no-op (not an error) for an
+   * id this process isn't tracking, the same "unknown id is harmless" shape
+   * as every other per-id lookup in this class (e.g. get()). */
+  markEventsSeen(id: string, seq: number): void {
+    this.sessions.get(id)?.markEventsSeen(seq);
   }
 
   /** Kill our tracked attach-client only (detach); the dtach master + program survive. */
@@ -813,6 +1162,11 @@ export class PtyManager {
 
   /** Kill every tracked attach-client. Called on server shutdown; the dtach masters survive. */
   killAll(): void {
+    // Defense-in-depth alongside attentionEvalTimer's own unref() — same
+    // "stop it explicitly on shutdown too, don't rely on unref() alone"
+    // posture as src/plugins/pty.ts's onClose hook takes with its
+    // reconcile timer.
+    clearInterval(this.attentionEvalTimer);
     for (const id of [...this.sessions.keys()]) this.kill(id);
   }
 

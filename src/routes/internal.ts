@@ -15,6 +15,7 @@ import { listBranches, listWorktrees } from "../services/git-refs.js";
 import { getCachedAgents } from "../services/agent-detect.js";
 import { resolveGlobalPresets } from "./actions.js";
 import { attachSocketToSession } from "./terminal.js";
+import { attachLocalEventsSocket } from "./events.js";
 import type { SessionInfo } from "../services/pty-manager.js";
 import {
   MAX_UPLOAD_BYTES,
@@ -517,6 +518,22 @@ export async function internalRoutes(app: FastifyInstance) {
         cols,
         rows,
       });
+    },
+  );
+
+  // The DB-less counterpart to /ws/events (routes/events.ts) — issue #166's
+  // multi-host twin. The primary opens one of these per registered remote
+  // host and relays its events into its own aggregated /ws/events stream
+  // (see events.ts's own comment on that relay). No query params: like the
+  // primary's own /ws/events, this is one aggregated stream covering every
+  // session THIS agent tracks, not a per-session attach — attachLocalEventsSocket
+  // is the exact same shared core the primary's own route uses, just reused
+  // against this agent's own app.pty instead.
+  app.get(
+    "/internal/ws/events",
+    { websocket: true, config: INTERNAL_RATE_LIMIT.config },
+    (socket) => {
+      attachLocalEventsSocket(app, socket);
     },
   );
 

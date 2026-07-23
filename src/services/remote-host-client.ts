@@ -279,6 +279,23 @@ export class RemoteHostClient {
   }
 
   /**
+   * Opens (but does not wait for) a WS connection to this agent's
+   * `/internal/ws/events` (issue #166) — the events-channel counterpart to
+   * openAttach() above, bearer-authed the same header-only way (the `ws`
+   * package, not the browser/global WebSocket API, is what makes a custom
+   * Authorization header possible on the upgrade request). Unlike
+   * openAttach(), this takes no per-session target — it's one aggregated
+   * stream covering every session this agent tracks, so there are no query
+   * params to build. Callers (routes/events.ts) own the open/error/close
+   * lifecycle and the actual frame relaying.
+   */
+  openEventsStream(): NodeWebSocket {
+    return new NodeWebSocket(`${this.wsBaseUrl}/internal/ws/events`, {
+      headers: { authorization: `Bearer ${this.token}` },
+    });
+  }
+
+  /**
    * Forwards an HTTP preview request to this agent's own
    * `/internal/preview/:port/*` (issue #28 phase 6) — the agent, not this
    * process, dials the actual dev server, always on its own loopback (see

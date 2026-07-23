@@ -5,7 +5,11 @@ import {
   detectAltScreenSwitch,
   applyMouseModeChanges,
   carryPartialEscape,
+  advanceAttention,
+  ATTENTION_CONFIRM_MS,
+  INITIAL_ATTENTION_STATE,
   INITIAL_MOUSE_TRACKING_STATE,
+  type AttentionMachineState,
   type MouseTrackingState,
 } from "../../src/services/attention-detect.js";
 
@@ -306,5 +310,229 @@ describe("chunk-boundary split sequences (the bug carryPartialEscape closes)", (
     }
     expect(lastSwitch).toBe("alt");
     expect(carry).toBe("");
+  });
+});
+
+describe("advanceAttention (issue #171/#98 attention state machine)", () => {
+  const T0 = 1_000_000; // arbitrary base epoch, kept small/readable in assertions
+
+  it("stays idle and returns the same reference for plain output or a tick with no pending signal", () => {
+    const output = advanceAttention(INITIAL_ATTENTION_STATE, { type: "output", now: T0 });
+    expect(output.next).toBe(INITIAL_ATTENTION_STATE);
+    expect(output.emit).toEqual([]);
+    expect(output.log).toEqual([]);
+
+    const tick = advanceAttention(INITIAL_ATTENTION_STATE, { type: "tick", now: T0 });
+    expect(tick.next).toBe(INITIAL_ATTENTION_STATE);
+  });
+
+  it("a nonzero-threshold signal (bell) from idle enters PENDING_ATTENTION without emitting yet", () => {
+    const { next, emit, log } = advanceAttention(INITIAL_ATTENTION_STATE, {
+      type: "signal",
+      kind: "bell",
+      now: T0,
+    });
+    expect(next).toEqual({
+      state: "pending_attention",
+      pendingKind: "bell",
+      pendingSince: T0,
+      confirmedAt: null,
+    });
+    expect(emit).toEqual([]);
+    expect(log).toEqual([{ from: "idle", to: "pending_attention", kind: "bell" }]);
+  });
+
+  it("does not confirm a tick before the pending kind's own threshold has elapsed", () => {
+    const pending = advanceAttention(INITIAL_ATTENTION_STATE, {
+      type: "signal",
+      kind: "bell",
+      now: T0,
+    }).next;
+    const { next, emit } = advanceAttention(pending, {
+      type: "tick",
+      now: T0 + ATTENTION_CONFIRM_MS.bell - 1,
+    });
+    expect(next).toBe(pending); // unchanged
+    expect(emit).toEqual([]);
+  });
+
+  it("confirms via tick exactly once the pending kind's threshold has elapsed, emitting attention:true", () => {
+    const pending = advanceAttention(INITIAL_ATTENTION_STATE, {
+      type: "signal",
+      kind: "bell",
+      now: T0,
+    }).next;
+    const confirmAt = T0 + ATTENTION_CONFIRM_MS.bell;
+    const { next, emit, log } = advanceAttention(pending, { type: "tick", now: confirmAt });
+    expect(next).toEqual({
+      state: "attention",
+      pendingKind: null,
+      pendingSince: null,
+      confirmedAt: confirmAt,
+    });
+    expect(emit).toEqual([{ attention: true, signal: "bell" }]);
+    expect(log).toEqual([{ from: "pending_attention", to: "attention", kind: "bell" }]);
+  });
+
+  it("cancels a pending signal outright when plain output arrives before it confirms", () => {
+    const pending = advanceAttention(INITIAL_ATTENTION_STATE, {
+      type: "signal",
+      kind: "bell",
+      now: T0,
+    }).next;
+    const { next, emit } = advanceAttention(pending, { type: "output", now: T0 + 100 });
+    expect(next).toEqual(INITIAL_ATTENTION_STATE);
+    expect(emit).toEqual([]);
+  });
+
+  it("a fresh signal while still pending restarts the window against the newest kind/timestamp, never confirming from the arrival alone", () => {
+    // This is the exact mechanism that fixes issue #171's false positive: a
+    // second (or third, fourth, ...) bell arriving before the first one's
+    // window elapsed just re-arms PENDING_ATTENTION rather than being
+    // treated as "still attention, extend it" the way an already-CONFIRMED
+    // session's repeat signal is.
+    const first = advanceAttention(INITIAL_ATTENTION_STATE, {
+      type: "signal",
+      kind: "bell",
+      now: T0,
+    }).next;
+    const { next, emit } = advanceAttention(first, {
+      type: "signal",
+      kind: "bell",
+      now: T0 + 200,
+    });
+    expect(next).toEqual({
+      state: "pending_attention",
+      pendingKind: "bell",
+      pendingSince: T0 + 200, // window restarted, not extended from T0
+      confirmedAt: null,
+    });
+    expect(emit).toEqual([]); // never confirmed, so nothing to emit
+  });
+
+  it("false-positive regression: a rapid BEL burst never confirms attention, only genuine silence after it does", () => {
+    // Simulates a busy TUI ringing the bell every 200ms — well inside
+    // ATTENTION_CONFIRM_MS.bell (2000ms) — for a full second, i.e. exactly
+    // the pattern that used to trip the old ATTENTION_CLEAR_WINDOW_MS logic
+    // into a transient true/false flicker on every single bell.
+    let state: AttentionMachineState = INITIAL_ATTENTION_STATE;
+    let lastBellAt = T0;
+    for (let i = 0; i < 6; i++) {
+      lastBellAt = T0 + i * 200;
+      const { next, emit } = advanceAttention(state, {
+        type: "signal",
+        kind: "bell",
+        now: lastBellAt,
+      });
+      state = next;
+      expect(emit).toEqual([]); // never confirms mid-burst
+      expect(state.state).not.toBe("attention");
+    }
+
+    // A tick shortly after the LAST bell — still short of ITS OWN
+    // threshold — must not confirm either.
+    const tooSoon = advanceAttention(state, {
+      type: "tick",
+      now: lastBellAt + ATTENTION_CONFIRM_MS.bell - 1,
+    });
+    expect(tooSoon.next.state).toBe("pending_attention");
+
+    // Only once the burst genuinely stops and stays quiet for the full
+    // window does it confirm — this is the correct "eventually actually
+    // done" case, not a false positive.
+    const confirmed = advanceAttention(state, {
+      type: "tick",
+      now: lastBellAt + ATTENTION_CONFIRM_MS.bell,
+    });
+    expect(confirmed.next.state).toBe("attention");
+    expect(confirmed.emit).toEqual([{ attention: true, signal: "bell" }]);
+  });
+
+  it.each(["titleIdle", "altScreenExit", "silence"] as const)(
+    "confirms a zero-threshold kind (%s) immediately from idle, with no PENDING_ATTENTION step",
+    (kind) => {
+      expect(ATTENTION_CONFIRM_MS[kind]).toBe(0);
+      const { next, emit, log } = advanceAttention(INITIAL_ATTENTION_STATE, {
+        type: "signal",
+        kind,
+        now: T0,
+      });
+      expect(next).toEqual({
+        state: "attention",
+        pendingKind: null,
+        pendingSince: null,
+        confirmedAt: T0,
+      });
+      expect(emit).toEqual([{ attention: true, signal: kind }]);
+      expect(log).toEqual([{ from: "idle", to: "attention", kind }]);
+    },
+  );
+
+  it("per-kind thresholds: a notification confirms sooner than a bare bell would at the same elapsed time", () => {
+    expect(ATTENTION_CONFIRM_MS.notification).toBeLessThan(ATTENTION_CONFIRM_MS.bell);
+
+    const pendingNotification = advanceAttention(INITIAL_ATTENTION_STATE, {
+      type: "signal",
+      kind: "notification",
+      now: T0,
+    }).next;
+    const pendingBell = advanceAttention(INITIAL_ATTENTION_STATE, {
+      type: "signal",
+      kind: "bell",
+      now: T0,
+    }).next;
+
+    const elapsedAt = T0 + ATTENTION_CONFIRM_MS.notification;
+    expect(advanceAttention(pendingNotification, { type: "tick", now: elapsedAt }).next.state).toBe(
+      "attention",
+    );
+    expect(advanceAttention(pendingBell, { type: "tick", now: elapsedAt }).next.state).toBe(
+      "pending_attention", // not yet — bell's own, longer threshold hasn't elapsed
+    );
+  });
+
+  it("a repeated signal once already confirmed refreshes confirmedAt without re-emitting or re-logging", () => {
+    const confirmed: AttentionMachineState = {
+      state: "attention",
+      pendingKind: null,
+      pendingSince: null,
+      confirmedAt: T0,
+    };
+    const { next, emit, log } = advanceAttention(confirmed, {
+      type: "signal",
+      kind: "bell",
+      now: T0 + 5_000,
+    });
+    expect(next).toEqual({ ...confirmed, confirmedAt: T0 + 5_000 });
+    expect(emit).toEqual([]);
+    expect(log).toEqual([]);
+  });
+
+  it("a tick while already confirmed is a no-op", () => {
+    const confirmed: AttentionMachineState = {
+      state: "attention",
+      pendingKind: null,
+      pendingSince: null,
+      confirmedAt: T0,
+    };
+    const { next, emit } = advanceAttention(confirmed, { type: "tick", now: T0 + 5_000 });
+    expect(next).toBe(confirmed);
+    expect(emit).toEqual([]);
+  });
+
+  it("plain output while confirmed clears attention, passing through CLEARING in the log within the same call", () => {
+    const confirmed: AttentionMachineState = {
+      state: "attention",
+      pendingKind: null,
+      pendingSince: null,
+      confirmedAt: T0,
+    };
+    const { next, emit, log } = advanceAttention(confirmed, { type: "output", now: T0 + 500 });
+    expect(next).toEqual(INITIAL_ATTENTION_STATE);
+    expect(emit).toEqual([{ attention: false }]);
+    expect(log).toEqual([
+      { from: "attention", to: "clearing" },
+      { from: "clearing", to: "idle" },
+    ]);
   });
 });

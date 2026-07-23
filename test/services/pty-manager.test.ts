@@ -123,6 +123,11 @@ describe("PtyManager", () => {
   });
 
   afterEach(() => {
+    // Stops PtyManager's own attention-evaluator interval (issue #171/#98) —
+    // unref()'d so it can't hang the test runner either way, but leaving it
+    // running would keep ticking (and console.debug-logging) an abandoned
+    // manager's sessions into later, unrelated tests.
+    manager.killAll();
     fs.rmSync(sessionsDir, { recursive: true, force: true });
   });
 
@@ -1066,7 +1071,17 @@ describe("PtyManager", () => {
       }
     });
 
-    it("sets attention once a bell or OSC 9/777 notification is observed", async () => {
+    // Issue #171/#98: the ad-hoc "bell followed by another chunk within
+    // ATTENTION_CLEAR_WINDOW_MS clears it" heuristic these three tests used
+    // to cover is gone — replaced by the explicit attention-detect.ts state
+    // machine (IDLE -> PENDING_ATTENTION -> ATTENTION -> CLEARING). A signal
+    // no longer confirms synchronously; it must go uncontradicted for its
+    // own per-kind ATTENTION_CONFIRM_MS window (checked by Session.tick(),
+    // the one new timer this PR adds — see ATTENTION_EVAL_INTERVAL_MS in
+    // pty-manager.ts) before `attention` reads true. Tests call tick()
+    // directly with a synthetic `now` rather than waiting on the real
+    // interval or faking real timers, per tick()'s own doc comment.
+    it("does not set attention while a bell is still debouncing (PENDING_ATTENTION)", async () => {
       const session = manager.getOrCreate({
         id: "1",
         cwd: "/tmp",
@@ -1078,13 +1093,76 @@ describe("PtyManager", () => {
 
       expect(session.toInfo().attention).toBe(false);
       fakePtyChildren[0].emitData("done\x07");
+      // Not yet confirmed — the bell's own 2s debounce hasn't elapsed.
+      expect(session.toInfo().attention).toBe(false);
+    });
+
+    it("confirms attention once a bell's debounce window elapses with nothing to contradict it", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("done\x07");
+      session.tick(Date.now() + 2_000); // past ATTENTION_CONFIRM_MS.bell
 
       const info = session.toInfo();
       expect(info.attention).toBe(true);
       expect(info.attentionAt).toEqual(expect.any(Number));
     });
 
-    it("clears attention when output continues within the burst window after a bell", async () => {
+    it("cancels a pending bell if plain output arrives before its debounce window elapses", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("progress\x07"); // bell mid-work -> PENDING_ATTENTION
+      // Output resumes before the bell's window elapses — that's itself
+      // evidence the program is still working, so the pending signal is
+      // cancelled outright rather than ever confirming.
+      fakePtyChildren[0].emitData("more progress");
+      session.tick(Date.now() + 3_000); // well past the bell's own window
+      expect(session.toInfo().attention).toBe(false);
+    });
+
+    it("keeps attention set when a confirmed bell is followed by silence", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("done\x07");
+      session.tick(Date.now() + 2_000); // confirms
+      expect(session.toInfo().attention).toBe(true);
+
+      // No further output arrives — nothing clears the flag, and re-ticking
+      // an already-confirmed session is a no-op, so it correctly keeps
+      // reading as "needs input".
+      session.tick(Date.now() + 7_000);
+      expect(session.toInfo().attention).toBe(true);
+    });
+
+    it("never confirms attention from a rapid BEL burst during heavy output (issue #171 false-positive regression)", async () => {
+      // The original bug: a bell followed by ANOTHER chunk within the burst
+      // window cleared attention a tick later, but each bell in a rapid
+      // burst still transiently flagged `attention: true` (and emitted a
+      // #166 event) the instant it arrived, before self-correcting. This
+      // simulates a busy Ink-style TUI (Claude Code/Codex) ringing the bell
+      // roughly every 200ms as an incidental part of normal rendering —
+      // each one must just re-arm the pending window, never confirm.
       const session = manager.getOrCreate({
         id: "1",
         cwd: "/tmp",
@@ -1095,24 +1173,132 @@ describe("PtyManager", () => {
       await waitForSpawn(session);
 
       vi.useFakeTimers({ toFake: ["Date"] });
+      let lastBellAt = 0;
       try {
         const start = Date.now();
-        vi.setSystemTime(start);
-        fakePtyChildren[0].emitData("progress\x07"); // bell mid-work
-        expect(session.toInfo().attention).toBe(true);
+        for (let i = 0; i < 20; i++) {
+          lastBellAt = start + i * 200;
+          vi.setSystemTime(lastBellAt);
+          fakePtyChildren[0].emitData(`frame ${i}\x07`);
+          expect(session.toInfo().attention).toBe(false);
+        }
 
-        // A further chunk arrives shortly after (within the burst window)
-        // with no bell of its own — the earlier bell was a work-in-progress
-        // ping, not a "waiting for input" signal, so attention clears.
-        vi.setSystemTime(start + 500);
-        fakePtyChildren[0].emitData("more progress");
+        // Even ticking shortly after the LAST bell in the burst — before
+        // ITS OWN 2s debounce has elapsed — must not confirm.
+        session.tick(lastBellAt + 500);
         expect(session.toInfo().attention).toBe(false);
       } finally {
         vi.useRealTimers();
       }
+
+      // Only once the burst genuinely STOPS and stays quiet for the bell's
+      // full debounce window does it confirm — the correct "eventually
+      // actually done" case, not a false positive.
+      session.tick(lastBellAt + 2_000);
+      expect(session.toInfo().attention).toBe(true);
     });
 
-    it("keeps attention set when a bell is followed by silence", async () => {
+    it("confirms an OSC 9 notification faster than a bare bell (per-kind thresholds)", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("\x1b]9;Build finished\x07"); // OSC 9 notification
+      session.tick(Date.now() + 1_000); // notification's own, shorter threshold
+      expect(session.toInfo().attention).toBe(true);
+    });
+
+    it("does not yet confirm a bare bell at the 1s mark a notification would already confirm at", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("done\x07");
+      session.tick(Date.now() + 1_000); // still short of the bell's 2s threshold
+      expect(session.toInfo().attention).toBe(false);
+      session.tick(Date.now() + 2_000);
+      expect(session.toInfo().attention).toBe(true);
+    });
+
+    it("sets attention on a working->idle title transition (#98)", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "claude",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("\x1b]2;Thinking…\x07"); // working title
+      expect(session.toInfo().attention).toBe(false);
+
+      // titleIdle is a zero-threshold kind (already a deliberate, debounced
+      // signal by construction — see ATTENTION_CONFIRM_MS) — confirms
+      // immediately, no tick() needed.
+      fakePtyChildren[0].emitData("\x1b]2;Ready\x07"); // idle title
+      expect(session.toInfo().attention).toBe(true);
+    });
+
+    it("does not set attention for an idle title with no prior working title observed", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "claude",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      // First title this session has ever reported is already idle — there
+      // was no "working" read to transition FROM, so this isn't the #98
+      // signal at all.
+      fakePtyChildren[0].emitData("\x1b]2;Ready\x07");
+      expect(session.toInfo().attention).toBe(false);
+    });
+
+    it("sets attention when a program exits alt-screen mode back to the shell prompt (#98)", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("\x1b[?1049h"); // enter alt-screen (e.g. an editor opening)
+      expect(session.toInfo().attention).toBe(false);
+
+      fakePtyChildren[0].emitData("\x1b[?1049l"); // exit -- zero-threshold, confirms immediately
+      expect(session.toInfo().attention).toBe(true);
+    });
+
+    it("does not set attention on ENTERING alt-screen, only on exit", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      fakePtyChildren[0].emitData("\x1b[?1049h");
+      expect(session.toInfo().attention).toBe(false);
+    });
+
+    it("sets attention after a sustained work streak goes silent for long enough (#98 sustained-silence-after-work)", async () => {
       const session = manager.getOrCreate({
         id: "1",
         cwd: "/tmp",
@@ -1126,16 +1312,43 @@ describe("PtyManager", () => {
       try {
         const start = Date.now();
         vi.setSystemTime(start);
-        fakePtyChildren[0].emitData("done\x07");
-        expect(session.toInfo().attention).toBe(true);
+        fakePtyChildren[0].emitData("agent output 1"); // streak starts
 
-        // No further output arrives — nothing clears the flag, so it
-        // correctly keeps reading as "needs input".
-        vi.setSystemTime(start + 5000);
-        expect(session.toInfo().attention).toBe(true);
+        vi.setSystemTime(start + 1_200); // past SUSTAIN_MS -- a genuine streak
+        fakePtyChildren[0].emitData("agent output 2");
+        expect(session.toInfo().activity).toBe("working");
+        expect(session.toInfo().attention).toBe(false); // not silent yet
+
+        // No further output at all — tick well past SUSTAINED_SILENCE_MS
+        // since the last chunk. This is a purely time-driven signal (see
+        // Session.tick's own doc comment) — nothing byte-driven triggers it.
+        session.tick(start + 1_200 + 10_000);
       } finally {
         vi.useRealTimers();
       }
+      expect(session.toInfo().attention).toBe(true);
+    });
+
+    it("does not fire the sustained-silence signal for a single spawn-time burst (not a real work streak)", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const start = Date.now();
+        vi.setSystemTime(start);
+        fakePtyChildren[0].emitData("prompt draw"); // single burst, never sustained
+        session.tick(start + 15_000);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(session.toInfo().attention).toBe(false);
     });
 
     it("tracks the most recent OSC 0/2 title-change payload", async () => {

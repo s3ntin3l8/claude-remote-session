@@ -4,7 +4,7 @@ import { ConfirmButton } from "./ConfirmButton.js";
 import { CreateProjectModal } from "./CreateProjectModal.js";
 import { KebabMenu } from "./KebabMenu.js";
 import { api, LOCAL_HOST_ID } from "./api.js";
-import type { DiscoveredProject, Host, Project, Session } from "./api.js";
+import type { DiscoveredProject, Host, NotificationEvent, Project, Session } from "./api.js";
 import { MullionMark } from "./assets/MullionMark.js";
 import { Dropdown } from "./settings/primitives.js";
 import { resolveAgentLogo, commandToBinary } from "./cliLogos.js";
@@ -302,6 +302,79 @@ function ProjectSection({
 // dimmed tombstone (see Sidebar's own filter comment). Attention takes
 // priority over working/idle since it's the highest-value signal for an
 // unwatched dashboard.
+
+// Single-event half of describeLatestEvent below — pulled apart so the
+// "walk backward until one describes" fallback there can call this per
+// candidate event without duplicating the switch. Mirrors pty-manager.ts's
+// emitEvent() call sites 1:1 (payload shapes there are the source of
+// truth); update this alongside any new kind/payload field. Returns null
+// when this specific event's kind/shape isn't one this has been taught
+// about yet.
+function describeEvent(event: NotificationEvent): { text: string; attention: boolean } | null {
+  switch (event.kind) {
+    case "attention": {
+      if (event.payload.attention !== true) {
+        // The state machine's own "clear" emit (attention-detect.ts) — no
+        // longer needs attention, but still worth surfacing as the latest
+        // event rather than reverting to "nothing to show".
+        return { text: "No longer needs attention", attention: false };
+      }
+      switch (event.payload.signal) {
+        case "bell":
+          return { text: "Bell", attention: true };
+        case "titleIdle":
+          return { text: "Finished — needs input", attention: true };
+        case "altScreenExit":
+          return { text: "Exited full-screen — needs input", attention: true };
+        case "silence":
+          return { text: "Gone quiet — needs input", attention: true };
+        case "notification":
+          return { text: "Sent a notification", attention: true };
+        default:
+          // A future signal kind this hasn't been taught yet.
+          return { text: "Needs input", attention: true };
+      }
+    }
+    case "status_change": {
+      if (event.payload.reason === "exited") return { text: "Exited", attention: false };
+      if (event.payload.screen === "alt") {
+        return { text: "Entered full-screen mode", attention: false };
+      }
+      if (event.payload.screen === "primary") {
+        return { text: "Exited full-screen mode", attention: false };
+      }
+      return null;
+    }
+    case "title_change":
+      return typeof event.payload.title === "string"
+        ? { text: event.payload.title, attention: false }
+        : null;
+    default:
+      return null;
+  }
+}
+
+// Issue #167's per-session status line — turns the most recent describable
+// NotificationEvent for a session into a short, human-readable string plus
+// whether it should get the "attention" color treatment. Walks backward
+// from the newest event rather than only looking at the very last one: a
+// top event whose kind/shape describeEvent doesn't recognize (a future
+// payload change, or a kind this hasn't been taught about) shouldn't blank
+// the line when an earlier, still-relevant event (e.g. the last title
+// change) can still describe it — last-known-good is more useful than
+// nothing. Returns null only when NO buffered event describes (including
+// the empty/undefined case), so SessionRow can render no line at all.
+function describeLatestEvent(
+  events: NotificationEvent[] | undefined,
+): { text: string; attention: boolean } | null {
+  if (!events) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const described = describeEvent(events[i]);
+    if (described) return described;
+  }
+  return null;
+}
+
 export function SessionRow({
   session,
   onOpen,
@@ -314,6 +387,11 @@ export function SessionRow({
   const isTerminal = session.status === "killed";
   const confirmBeforeKill = useDashboardStore((s) => s.settings.sessions.confirmBeforeKill);
   const theme = useDashboardStore((s) => s.theme);
+  // Issue #167 — the 1.1 events store slice (store.ts's `events`, fed by
+  // eventsClient.ts), scoped to just this session's list. Selector-based so
+  // a live event for a DIFFERENT session's list doesn't re-render this row.
+  const sessionEvents = useDashboardStore((s) => s.events[session.id]);
+  const eventLine = describeLatestEvent(sessionEvents);
   const agentLogo = resolveAgentLogo(session.command, theme);
   const agentBinary = commandToBinary(session.command);
 
@@ -379,24 +457,34 @@ export function SessionRow({
       draggable={true}
       onDragStart={onDragStart}
     >
-      {dot}
-      {agentLogo && (
-        <img src={agentLogo} alt="" width={14} height={14} className="session-agent-logo" />
-      )}
-      {showAgentFallback && <span className="session-agent-text">{agentBinary}</span>}
-      <span className={`session-name${showCommand ? " mono" : ""}`} title={title}>
-        {title}
-      </span>
-      {statusLabel}
-      {!isTerminal && (
-        <span onClick={(e) => e.stopPropagation()}>
-          <ConfirmButton
-            title="End this session (the program will be terminated)"
-            onConfirm={onEnd}
-            skipConfirm={!confirmBeforeKill}
-          >
-            <CloseIcon size={11} />
-          </ConfirmButton>
+      <div className="session-item-row">
+        {dot}
+        {agentLogo && (
+          <img src={agentLogo} alt="" width={14} height={14} className="session-agent-logo" />
+        )}
+        {showAgentFallback && <span className="session-agent-text">{agentBinary}</span>}
+        <span className={`session-name${showCommand ? " mono" : ""}`} title={title}>
+          {title}
+        </span>
+        {statusLabel}
+        {!isTerminal && (
+          <span onClick={(e) => e.stopPropagation()}>
+            <ConfirmButton
+              title="End this session (the program will be terminated)"
+              onConfirm={onEnd}
+              skipConfirm={!confirmBeforeKill}
+            >
+              <CloseIcon size={11} />
+            </ConfirmButton>
+          </span>
+        )}
+      </div>
+      {eventLine && (
+        <span
+          className={`session-event-line${eventLine.attention ? " attention" : ""}`}
+          title={eventLine.text}
+        >
+          {eventLine.text}
         </span>
       )}
     </div>

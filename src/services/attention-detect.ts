@@ -83,6 +83,277 @@ export function classifyActivityFromTitle(
   return null;
 }
 
+// --- Attention state machine (issue #171 / #98) -------------------------
+//
+// Replaces the old ad-hoc "bell followed by another chunk within
+// ATTENTION_CLEAR_WINDOW_MS clears it" check that used to live directly in
+// pty-manager.ts's Session.onData. That check had a real false-positive
+// bug: a rapid burst of bells during heavy TUI output (confirmed against
+// Claude Code's Ink renderer and Codex) set `attentionAt` — and emitted a
+// #166 `attention:true` event — on literally the FIRST bell in the burst,
+// then cleared it a chunk later, then set it again on the next bell, and so
+// on for the whole burst. Each of those was a real, if short-lived, false
+// alarm: any WS/event consumer polling or subscribing mid-burst would see
+// "needs attention" for a session that's still very much working.
+//
+// The fix is to never report attention as true until a candidate signal has
+// gone UNCONTRADICTED for long enough to be confident it's genuine — i.e.
+// an explicit PENDING_ATTENTION state between "a candidate signal arrived"
+// and "confirmed, tell the world". A signal is confirmed once
+// ATTENTION_CONFIRM_MS[kind] has elapsed with no further output arriving to
+// contradict it (see advanceAttention's "tick" input below); any output
+// arriving before that — a fresh candidate signal (which just restarts the
+// pending window with the newest kind/timestamp, so a whole burst just
+// keeps re-arming rather than ever confirming) or plain output (which
+// cancels the pending signal outright, since continued output IS the
+// "still working" evidence) — means it was never real attention at all, so
+// nothing is ever reported or emitted for it. This is deliberately a PURE,
+// synchronous reducer — no `Date.now()`/timers/emitEvent calls in here —
+// so `test/services/attention-detect.test.ts` can exercise every
+// transition, threshold and the burst-false-positive regression directly,
+// without needing fake timers or a real Session. See pty-manager.ts's
+// Session for the (small) stateful wrapper: it feeds chunks in via onData
+// and periodic real time via its own tick(), and turns `emit`/`log` below
+// into actual emitEvent("attention", ...) calls and debug log lines.
+export type AttentionState = "idle" | "pending_attention" | "attention" | "clearing";
+
+// The four kinds of candidate "something needs the user's attention"
+// signal this module recognizes. `silence` is distinct from the other
+// three: it's never detected here (there's no byte to scan for it — see
+// pty-manager.ts's Session.tick doc comment) but shares this machine and
+// its `signal` input shape once the caller has independently decided a
+// sustained work streak has gone quiet for long enough.
+export type AttentionSignalKind =
+  "bell" | "notification" | "titleIdle" | "altScreenExit" | "silence";
+
+// How long a candidate signal must go uncontradicted (no further output at
+// all) before PENDING_ATTENTION confirms into ATTENTION. Deliberately
+// per-kind, not a single shared window — see each entry's own comment.
+export const ATTENTION_CONFIRM_MS: Record<AttentionSignalKind, number> = {
+  // Matches the old ATTENTION_CLEAR_WINDOW_MS default. A bare BEL is the
+  // noisiest of these signals by far — plenty of TUIs (Ink-based ones
+  // especially) ring it as an incidental part of normal rendering, not as a
+  // deliberate "look at me" — so it gets the longest debounce.
+  bell: 2_000,
+  // An OSC 9/777 desktop notification is a deliberate API call a program
+  // makes specifically to signal something happened — meaningfully less
+  // noisy than a bare bell, so it doesn't need as long a window to trust.
+  notification: 1_000,
+  // A working->idle TITLE transition (see classifyActivityFromTitle) only
+  // fires on an actual title *change*, not once per render frame the way a
+  // bell can — it's already a debounced, deliberate signal by construction,
+  // so there's nothing left to gain by making callers wait further.
+  titleIdle: 0,
+  // Same reasoning as titleIdle: exiting alt-screen mode is itself a
+  // discrete, deliberate transition (a TUI/editor closing back to the
+  // shell prompt), not a per-chunk noise source.
+  altScreenExit: 0,
+  // The caller (Session.tick) has already waited out its own
+  // SUSTAINED_SILENCE_MS quiet period before ever raising this signal —
+  // layering a second wait on top here would just double-count the same
+  // silence.
+  silence: 0,
+};
+
+export interface AttentionMachineState {
+  state: AttentionState;
+  /** Which kind is currently being debounced, or null outside PENDING_ATTENTION. */
+  pendingKind: AttentionSignalKind | null;
+  /** Ms-epoch the current pending signal was (last) raised, or null outside PENDING_ATTENTION. */
+  pendingSince: number | null;
+  /** Ms-epoch this session was last confirmed as needing attention, or null
+   * whenever state isn't "attention" — this IS pty-manager.ts's public
+   * `attentionAt` field, folded into the machine's own state so there's
+   * only ever one timestamp to keep in sync rather than two parallel ones. */
+  confirmedAt: number | null;
+}
+
+export const INITIAL_ATTENTION_STATE: AttentionMachineState = {
+  state: "idle",
+  pendingKind: null,
+  pendingSince: null,
+  confirmedAt: null,
+};
+
+export type AttentionInput =
+  // A candidate signal (bell/notification/titleIdle/altScreenExit/silence)
+  // was observed in this chunk (or, for `silence`, by the periodic evaluator).
+  | { type: "signal"; kind: AttentionSignalKind; now: number }
+  // A chunk arrived that carried none of the above — still meaningful: it's
+  // evidence the program is producing output, which can cancel a pending
+  // signal or clear a confirmed one (see the "pending_attention"/"attention"
+  // cases in advanceAttention).
+  | { type: "output"; now: number }
+  // No new bytes at all — the periodic evaluator's "has enough silent time
+  // now passed to confirm a pending signal?" check. This is the ONLY input
+  // that can move PENDING_ATTENTION -> ATTENTION for a nonzero-threshold
+  // kind, since nothing else in this module runs off a timer.
+  | { type: "tick"; now: number };
+
+export interface AttentionEmit {
+  attention: boolean;
+  /** Which kind confirmed attention — omitted on the corresponding "false"
+   * (clear) emit, since a clear isn't itself attributed to any one kind. */
+  signal?: AttentionSignalKind;
+}
+
+/** One state transition, for the debug logging the issue asks for — pure
+ * data (no I/O), turned into actual log lines by pty-manager.ts's Session.
+ * A single advanceAttention() call can produce two of these (attention ->
+ * clearing -> idle resolves within one call — see clearAttention's doc
+ * comment for why CLEARING never actually persists as its own state). */
+export interface AttentionLogEntry {
+  from: AttentionState;
+  to: AttentionState;
+  kind?: AttentionSignalKind;
+}
+
+export interface AttentionTransition {
+  next: AttentionMachineState;
+  emit: AttentionEmit[];
+  log: AttentionLogEntry[];
+}
+
+// A transition with nothing to report — returns the SAME state reference
+// (not just an equal value), mirroring applyMouseModeChanges's "no-op
+// returns prev" contract elsewhere in this file, so callers can cheaply
+// tell "nothing changed" apart from "changed to an equal-looking value".
+function noop(state: AttentionMachineState): AttentionTransition {
+  return { next: state, emit: [], log: [] };
+}
+
+function enterPending(
+  state: AttentionMachineState,
+  kind: AttentionSignalKind,
+  now: number,
+): AttentionTransition {
+  const threshold = ATTENTION_CONFIRM_MS[kind];
+  if (threshold <= 0) {
+    // Zero-threshold kinds are already unambiguous, debounced-by-construction
+    // signals (see ATTENTION_CONFIRM_MS's per-kind comments) — nothing to
+    // gain by parking in PENDING_ATTENTION first, so skip straight to
+    // confirming.
+    return confirmAttention(state, kind, now);
+  }
+  return {
+    next: { state: "pending_attention", pendingKind: kind, pendingSince: now, confirmedAt: null },
+    emit: [],
+    log: [{ from: state.state, to: "pending_attention", kind }],
+  };
+}
+
+function cancelPending(state: AttentionMachineState): AttentionTransition {
+  return {
+    next: INITIAL_ATTENTION_STATE,
+    emit: [],
+    log: [{ from: state.state, to: "idle", kind: state.pendingKind ?? undefined }],
+  };
+}
+
+function confirmAttention(
+  state: AttentionMachineState,
+  kind: AttentionSignalKind,
+  now: number,
+): AttentionTransition {
+  // Already confirmed (a further signal arrived while ATTENTION was already
+  // set) — refresh the sticky timestamp but this isn't a new transition, so
+  // no re-emit/re-log, matching #166's original "wasAttention" transition
+  // guard (only the false -> true edge is event-worthy).
+  const alreadyConfirmed = state.state === "attention";
+  const next: AttentionMachineState = {
+    state: "attention",
+    pendingKind: null,
+    pendingSince: null,
+    confirmedAt: now,
+  };
+  return {
+    next,
+    emit: alreadyConfirmed ? [] : [{ attention: true, signal: kind }],
+    log: alreadyConfirmed ? [] : [{ from: state.state, to: "attention", kind }],
+  };
+}
+
+// No `state` parameter: the caller only ever calls this from the "attention"
+// case (see advanceAttention below), so both endpoints of the transition are
+// already fixed.
+function clearAttention(): AttentionTransition {
+  return {
+    next: INITIAL_ATTENTION_STATE,
+    emit: [{ attention: false }],
+    // Passes through CLEARING as a logged step distinct from a plain
+    // "attention -> idle" jump, without giving it its own persisted dwell
+    // time: unlike PENDING_ATTENTION -> ATTENTION (which must wait out real
+    // silence to rule out mid-render noise), the mere arrival of a
+    // signal-free chunk while ATTENTION is set is already sufficient
+    // evidence the program resumed and is no longer waiting on the user —
+    // there's no analogous "might just be noise" case to debounce against
+    // here, so resolving synchronously within this one call is correct, not
+    // a shortcut.
+    log: [
+      { from: "attention", to: "clearing" },
+      { from: "clearing", to: "idle" },
+    ],
+  };
+}
+
+/**
+ * The attention state machine's single transition function — see the
+ * "Attention state machine" comment above for the full false-positive-fix
+ * rationale. Pure: same (state, input) always produces the same output, no
+ * clock/IO reads. Callers own feeding real chunks/ticks in and turning
+ * `emit`/`log` into actual emitEvent()/debug-log calls (pty-manager.ts's
+ * Session).
+ */
+export function advanceAttention(
+  state: AttentionMachineState,
+  input: AttentionInput,
+): AttentionTransition {
+  switch (state.state) {
+    case "idle":
+      return input.type === "signal" ? enterPending(state, input.kind, input.now) : noop(state);
+
+    case "pending_attention":
+      if (input.type === "signal") {
+        // A fresh candidate signal before confirmation restarts the pending
+        // window against the NEWEST kind/timestamp — this is the core fix:
+        // a whole burst of bells during heavy output just keeps re-arming
+        // this window instead of ever accumulating enough quiet time to
+        // confirm (see the file-level comment above for the concrete bug).
+        return enterPending(state, input.kind, input.now);
+      }
+      if (input.type === "output") {
+        // Plain output before the window elapsed is itself evidence the
+        // program is still working — cancel outright.
+        return cancelPending(state);
+      }
+      // "tick": promote once enough quiet time has passed since the signal
+      // was (last) raised, with nothing since to contradict it.
+      {
+        const threshold = ATTENTION_CONFIRM_MS[state.pendingKind as AttentionSignalKind];
+        const elapsed = input.now - (state.pendingSince ?? input.now);
+        return elapsed >= threshold
+          ? confirmAttention(state, state.pendingKind as AttentionSignalKind, input.now)
+          : noop(state);
+      }
+
+    case "attention":
+      if (input.type === "signal") {
+        // Still needs attention — refresh confirmedAt, no new transition.
+        return { next: { ...state, confirmedAt: input.now }, emit: [], log: [] };
+      }
+      if (input.type === "output") return clearAttention();
+      return noop(state); // "tick": nothing to do once already confirmed.
+
+    case "clearing":
+      // Never actually reached in practice — clearAttention() resolves
+      // synchronously to "idle" within the same call that enters it (see
+      // its doc comment). Kept so AttentionState's full four-value union is
+      // still exhaustively handled here rather than silently assuming
+      // "clearing" can't occur.
+      return { next: INITIAL_ATTENTION_STATE, emit: [], log: [] };
+  }
+}
+
 // Matches the three enter/exit escape-sequence pairs xterm honors for the
 // alternate screen buffer — ?1049 (the modern pair: save/restore cursor +
 // clear), ?1047 (clear-on-exit only), and the legacy ?47 (no clear at all).

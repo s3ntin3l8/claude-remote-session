@@ -1,17 +1,22 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SessionRow } from "./Sidebar.js";
-import type { Session } from "./api.js";
+import type { NotificationEvent, Session } from "./api.js";
 
 // ConfirmButton checks settings.sessions.confirmBeforeKill from the store —
-// default it to false so the test doesn't need a full store hydrate.
+// default it to false so the test doesn't need a full store hydrate. `events`
+// is a `let` (not inlined into the factory) so individual tests can reassign
+// it before rendering — mirrors PaneTab.test.tsx's own mutable-mock-state
+// pattern for this same store mock shape.
+let events: Record<number, NotificationEvent[]>;
 vi.mock("./store.js", () => ({
   useDashboardStore: (selector: (s: unknown) => unknown) =>
     selector({
       settings: { sessions: { confirmBeforeKill: false } },
       theme: "dark",
+      events,
     }),
 }));
 
@@ -88,6 +93,10 @@ const SESSION: Session = {
   attentionAt: null,
   lastTitle: null,
 };
+
+beforeEach(() => {
+  events = {};
+});
 
 describe("SessionRow", () => {
   it("sets application/x-mullion-session on drag start", () => {
@@ -184,5 +193,109 @@ describe("SessionRow title display", () => {
       />,
     );
     expect(oscContainer.querySelector(".session-name.mono")).toBeNull();
+  });
+});
+
+describe("SessionRow status line (issue #167)", () => {
+  it("renders no status line when the session has no events yet", () => {
+    const { container } = render(
+      <SessionRow session={makeSession({})} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    expect(container.querySelector(".session-event-line")).toBeNull();
+  });
+
+  it("shows the latest event's text, uncolored, for an idle-ish event", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "title_change",
+          ts: Date.now(),
+          payload: { title: "running tests" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const line = container.querySelector(".session-event-line");
+    expect(line?.textContent).toBe("running tests");
+    expect(line?.classList.contains("attention")).toBe(false);
+  });
+
+  it("shows the latest event's text, colored, for an attention event", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "attention",
+          ts: Date.now(),
+          payload: { attention: true, signal: "bell" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const line = container.querySelector(".session-event-line");
+    expect(line?.textContent).toBe("Bell");
+    expect(line?.classList.contains("attention")).toBe(true);
+  });
+
+  it("falls back to an earlier describable event when the latest event's shape isn't recognized", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "title_change",
+          ts: Date.now(),
+          payload: { title: "running tests" },
+        },
+        {
+          // A status_change with neither "exited" nor a recognized screen
+          // value describeEvent() returns null for — the line should still
+          // show the earlier title_change rather than going blank.
+          seq: 2,
+          sessionId: 1,
+          kind: "status_change",
+          ts: Date.now(),
+          payload: { reason: "something-not-yet-taught" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const line = container.querySelector(".session-event-line");
+    expect(line?.textContent).toBe("running tests");
+    expect(line?.classList.contains("attention")).toBe(false);
+  });
+
+  it("picks the highest-seq event when several are buffered for a session", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "title_change",
+          ts: Date.now() - 1000,
+          payload: { title: "older title" },
+        },
+        {
+          seq: 2,
+          sessionId: 1,
+          kind: "status_change",
+          ts: Date.now(),
+          payload: { reason: "exited" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    expect(container.querySelector(".session-event-line")?.textContent).toBe("Exited");
   });
 });

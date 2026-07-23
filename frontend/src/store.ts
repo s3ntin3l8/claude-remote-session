@@ -5,6 +5,7 @@ import type {
   GitStatus,
   Group,
   Host,
+  NotificationEvent,
   Project,
   ProjectUrl,
   Session,
@@ -16,6 +17,7 @@ import type {
 import type { ReorderUpdate } from "./reorder.js";
 import { deepMerge, mergePartialPatch } from "./settingsMerge.js";
 import { isUnreadAttention, pruneAckedAttention } from "./attention.js";
+import { connectEventsStream, type EventsClientHandle } from "./eventsClient.js";
 
 // Which workspace was last active survives a reload via localStorage (not
 // the DB — it's a per-browser UI preference, not shared server state).
@@ -26,6 +28,11 @@ const ACTIVE_WORKSPACE_STORAGE_KEY = "crs.activeWorkspaceId";
 // polling a backgrounded tab, and it keeps a laptop-in-a-drawer session from
 // hammering the API forever.
 export const LIVE_REFRESH_INTERVAL_MS = 4000;
+// Bound on each session's own accumulated event list in the store (issue
+// #166) — generous headroom above the backend's own ~100-per-session ring
+// buffer cap (pty-manager.ts's EVENTS_MAX) since this also has to hold
+// whatever a single replay batch delivers on (re)connect.
+const EVENTS_PER_SESSION_CAP = 200;
 // Consecutive failed session-fetches (from any caller — the live poll,
 // Sidebar's own mount fetch, etc.) before the design's "whole backend down"
 // banner shows. >1 so a single transient blip doesn't flash it; in
@@ -180,6 +187,27 @@ interface DashboardState {
   // single project's git status being unavailable is routine, not a signal
   // the backend itself is down.
   gitStatuses: Record<number, GitStatus | null>;
+  // Phase 1's notification event model (issue #166) — accumulated events
+  // from the /ws/events push channel (eventsClient.ts), keyed by sessionId
+  // and bounded per session (EVENTS_PER_SESSION_CAP). Deduped by `seq` so a
+  // reconnect's replay batch (which can re-deliver events this store
+  // already has — see startEventsStream) never double-counts. Fed
+  // independently of, and in addition to, the existing 4s poll — see
+  // startLiveRefresh, which stays exactly as-is.
+  events: Record<number, NotificationEvent[]>;
+  // Client-side half of the 1.1 read cursor (issue #166's `lastSeenSeq`,
+  // server-side in pty-manager.ts) — PR1 wired the WS "seen" send
+  // (markEventSeen below) but never tracked what was actually marked seen on
+  // this side, so nothing could compute unread counts. Keyed by sessionId;
+  // a missing key means "nothing seen yet" (unread = every buffered event).
+  // Advanced only via markEventSeen, never decremented — mirrors the
+  // server's own monotonic-only `lastSeenSeq`. Not persisted (localStorage
+  // or otherwise): a reload legitimately re-shows the badge for events the
+  // user technically already saw last session, same tradeoff
+  // acknowledgedAttention used to accept before this existed. A real fix
+  // needs the server to expose its cursor on connect/replay, which PR1
+  // didn't build — out of scope here.
+  lastSeenSeq: Record<number, number>;
   workspaces: Workspace[];
   groups: Group[];
   // Registered hosts (issue #26) — includes the always-present "local" row.
@@ -320,6 +348,19 @@ interface DashboardState {
   // Kept as a store action (rather than plain App.tsx setInterval) so any
   // consumer of `sessions` gets the same live-refresh guarantee.
   startLiveRefresh: () => () => void;
+  // Connects the single /ws/events channel once (App.tsx's mount effect,
+  // alongside startLiveRefresh/startThemeWatch) and returns a cleanup
+  // function. Not per-pane — one connection covers every session.
+  startEventsStream: () => () => void;
+  // Advances a session's read cursor — both the local `lastSeenSeq` (so
+  // unread counts recompute immediately, even while the events channel is
+  // momentarily disconnected) and the server's own cursor via the "seen" WS
+  // message (a no-op while disconnected — see eventsClient.ts's sendSeen doc
+  // comment). The shared primitive 1.3's tab badges (PaneTab.tsx) and 1.4's
+  // event feed both consume; only ever advances (a smaller `seq` than what's
+  // already recorded is ignored), mirroring the server's own monotonic
+  // `lastSeenSeq`.
+  markEventSeen: (sessionId: number, seq: number) => void;
   // Re-resolves `theme` whenever the OS-level color-scheme preference
   // changes, but only while settings.theme === "system" — a no-op the rest
   // of the time. Returns a cleanup function; called once from App.tsx
@@ -339,6 +380,25 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
   // startLiveRefresh()'s own timer/cleanup closures already use below.
   let pendingPatch: SettingsPatch | null = null;
   let patchTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set once startEventsStream() connects (App.tsx's mount effect) — the
+  // handle markEventSeen() below sends "seen" messages through. Stays null
+  // until then (and after cleanup), matching eventsClient.ts's own
+  // "no-op while disconnected" semantics rather than throwing.
+  let eventsClientHandle: EventsClientHandle | null = null;
+
+  // Merges one incoming NotificationEvent into the per-session accumulated
+  // list, deduped by seq (a reconnect's replay batch can re-deliver an
+  // event this store already holds — see startEventsStream) and capped at
+  // EVENTS_PER_SESSION_CAP, oldest evicted first.
+  function addEvent(
+    events: Record<number, NotificationEvent[]>,
+    event: NotificationEvent,
+  ): Record<number, NotificationEvent[]> {
+    const existing = events[event.sessionId] ?? [];
+    if (existing.some((e) => e.seq === event.seq)) return events;
+    const next = [...existing, event].sort((a, b) => a.seq - b.seq).slice(-EVENTS_PER_SESSION_CAP);
+    return { ...events, [event.sessionId]: next };
+  }
 
   function flushPendingPatch() {
     if (!pendingPatch) return;
@@ -369,6 +429,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
     projects: [],
     sessions: [],
     gitStatuses: {},
+    events: {},
+    lastSeenSeq: {},
     projectUrls: {},
     workspaces: [],
     groups: [],
@@ -745,6 +807,26 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
         stop();
         document.removeEventListener("visibilitychange", onVisibilityChange);
       };
+    },
+
+    startEventsStream: () => {
+      const handle = connectEventsStream((event) => {
+        set((state) => ({ events: addEvent(state.events, event) }));
+      });
+      eventsClientHandle = handle;
+      return () => {
+        handle.close();
+        if (eventsClientHandle === handle) eventsClientHandle = null;
+      };
+    },
+
+    markEventSeen: (sessionId, seq) => {
+      set((state) => {
+        const current = state.lastSeenSeq[sessionId] ?? 0;
+        if (seq <= current) return state;
+        return { lastSeenSeq: { ...state.lastSeenSeq, [sessionId]: seq } };
+      });
+      eventsClientHandle?.sendSeen(sessionId, seq);
     },
 
     startThemeWatch: () => {
