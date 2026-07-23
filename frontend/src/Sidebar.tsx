@@ -424,9 +424,10 @@ export function SessionRow({
   // client-side against the project's unfiltered PR list rather than
   // firing a `?branch=` request per session (api.ts's getProjectGitHubPRs
   // doc comment).
-  const matchedPr = gitStatus
-    ? prsStatus?.prs.find((pr) => pr.headBranch === gitStatus.branch)
-    : undefined;
+  const matchedPr =
+    gitStatus && prsStatus?.prs
+      ? prsStatus.prs.find((pr) => pr.headBranch === gitStatus.branch)
+      : undefined;
 
   const title =
     session.nameLocked && session.name
