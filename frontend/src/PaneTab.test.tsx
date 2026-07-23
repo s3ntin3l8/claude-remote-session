@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { PaneTab } from "./PaneTab.js";
 import type { GitStatus, NotificationEvent, Project, Session } from "./api.js";
 import type { IDockviewPanel, IDockviewPanelHeaderProps } from "dockview-react";
@@ -274,8 +274,11 @@ describe("PaneTab", () => {
       expect(container.querySelector(".pane-tab-unread-badge")).toBeInTheDocument();
       expect(markEventSeen).not.toHaveBeenCalled();
 
-      // Simulate dockview firing the active-change event.
-      activeChangeHandler?.({ isActive: true });
+      // Simulate dockview firing the active-change event. Wrapped in act()
+      // since the handler now only calls setIsActive (a state update, not a
+      // direct side effect) — the actual markEventSeen call happens in a
+      // follow-up effect that needs a flushed render to run.
+      act(() => activeChangeHandler?.({ isActive: true }));
       expect(markEventSeen).toHaveBeenCalledWith(session.id, 5);
 
       // Re-render with the store's lastSeenSeq now reflecting that call
@@ -291,6 +294,27 @@ describe("PaneTab", () => {
       };
       render(<PaneTab {...makeProps({ isActive: true })} />);
       expect(markEventSeen).toHaveBeenCalledWith(session.id, 3);
+    });
+
+    it("marks a new event seen immediately if it arrives while the tab is already active — doesn't wait for a re-focus", () => {
+      events = { [session.id]: [makeEvent({ seq: 1 })] };
+      const { container, rerender } = render(<PaneTab {...makeProps({ isActive: true })} />);
+      expect(markEventSeen).toHaveBeenCalledWith(session.id, 1);
+      // The mock's markEventSeen already updated the shared `lastSeenSeq`
+      // (same as the real store action would) — re-rendering off that,
+      // same two-step pattern as the "becomes active" test above, confirms
+      // the badge reflects it.
+      rerender(<PaneTab {...makeProps({ isActive: true })} />);
+      expect(container.querySelector(".pane-tab-unread-badge")).not.toBeInTheDocument();
+
+      // A second event arrives while this tab is still the active one —
+      // simulated by a re-render with a new `events` value, same as a real
+      // store update from the /ws/events stream would trigger.
+      events = { [session.id]: [makeEvent({ seq: 1 }), makeEvent({ seq: 2 })] };
+      rerender(<PaneTab {...makeProps({ isActive: true })} />);
+      expect(markEventSeen).toHaveBeenCalledWith(session.id, 2);
+      rerender(<PaneTab {...makeProps({ isActive: true })} />);
+      expect(container.querySelector(".pane-tab-unread-badge")).not.toBeInTheDocument();
     });
   });
 

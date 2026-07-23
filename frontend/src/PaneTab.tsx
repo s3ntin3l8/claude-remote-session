@@ -203,29 +203,38 @@ export function PaneTab(props: IDockviewPanelHeaderProps<TerminalPaneParams>) {
     [],
   );
 
-  // Issue #168 — clears the unread badge by advancing the read cursor
-  // (store.ts's markEventSeen, which updates the local lastSeenSeq and
-  // sends the "seen" WS message) whenever this tab becomes the active one,
-  // including if it's already active at mount (e.g. the default tab on
-  // first load). Reads sessionId's latest events via getState() rather than
-  // the reactive `events` selector above so this effect doesn't need to
-  // re-subscribe every time a new event arrives — mirrors
-  // TerminalPanelWrapper's onTitleChange in App.tsx.
+  // Issue #168 — tracks whether this tab is dockview's currently active one.
+  // The `useState(props.api.isActive)` initializer (only ever read on this
+  // component's very first render) is what makes an already-active tab at
+  // mount — e.g. the default tab on first load — read correctly without
+  // waiting for a transition; the effect below only needs to subscribe for
+  // *changes* after that, not re-assert the mount-time value (doing so
+  // synchronously in the effect body is a redundant, lint-flagged extra
+  // render). Deliberately its own effect/state (not folded into the
+  // mark-seen effect below): this subscription must NOT depend on `events`
+  // (it would re-subscribe on every new event), but marking seen DOES need
+  // to re-run on every new event while active — see that effect's own
+  // comment.
+  const [isActive, setIsActive] = useState(props.api.isActive);
   useEffect(() => {
-    const markSeen = () => {
-      const current = useDashboardStore.getState().events[sessionId];
-      if (!current || current.length === 0) return;
-      // addEvent (store.ts) keeps each session's list sorted ascending by
-      // seq, so the last entry is always the highest.
-      const maxSeq = current[current.length - 1].seq;
-      useDashboardStore.getState().markEventSeen(sessionId, maxSeq);
-    };
-    if (props.api.isActive) markSeen();
-    const disposable = props.api.onDidActiveChange((e) => {
-      if (e.isActive) markSeen();
-    });
+    const disposable = props.api.onDidActiveChange((e) => setIsActive(e.isActive));
     return () => disposable.dispose();
   }, [sessionId, props.api]);
+
+  // Clears the unread badge by advancing the read cursor (store.ts's
+  // markEventSeen, which updates the local lastSeenSeq and sends the "seen"
+  // WS message) whenever this tab is active — re-runs on every new `events`
+  // arrival too, not just the activation transition above, so a
+  // notification that arrives *while* the tab is already the one on screen
+  // doesn't linger on it until the user clicks away and back.
+  useEffect(() => {
+    if (!isActive) return;
+    if (!events || events.length === 0) return;
+    // addEvent (store.ts) keeps each session's list sorted ascending by seq,
+    // so the last entry is always the highest.
+    const maxSeq = events[events.length - 1].seq;
+    useDashboardStore.getState().markEventSeen(sessionId, maxSeq);
+  }, [isActive, events, sessionId]);
 
   // #98 item 6 — a brief stronger "just fired" burst on the false->true
   // attention transition (see JUST_FIRED_ATTENTION_MS), settling into the
