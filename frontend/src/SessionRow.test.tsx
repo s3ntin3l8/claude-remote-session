@@ -240,8 +240,38 @@ describe("SessionRow status line (issue #167)", () => {
       <SessionRow session={makeSession({})} onOpen={vi.fn()} onEnd={vi.fn()} />,
     );
     const line = container.querySelector(".session-event-line");
-    expect(line?.textContent).toBe("Needs input");
+    expect(line?.textContent).toBe("Bell");
     expect(line?.classList.contains("attention")).toBe(true);
+  });
+
+  it("falls back to an earlier describable event when the latest event's shape isn't recognized", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "title_change",
+          ts: Date.now(),
+          payload: { title: "running tests" },
+        },
+        {
+          // A status_change with neither "exited" nor a recognized screen
+          // value describeEvent() returns null for — the line should still
+          // show the earlier title_change rather than going blank.
+          seq: 2,
+          sessionId: 1,
+          kind: "status_change",
+          ts: Date.now(),
+          payload: { reason: "something-not-yet-taught" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const line = container.querySelector(".session-event-line");
+    expect(line?.textContent).toBe("running tests");
+    expect(line?.classList.contains("attention")).toBe(false);
   });
 
   it("picks the highest-seq event when several are buffered for a session", () => {

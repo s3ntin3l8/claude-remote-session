@@ -303,20 +303,14 @@ function ProjectSection({
 // priority over working/idle since it's the highest-value signal for an
 // unwatched dashboard.
 
-// Issue #167's per-session status line — turns the most recent
-// NotificationEvent for a session into a short, human-readable string plus
-// whether it should get the "attention" color treatment. Mirrors
-// pty-manager.ts's emitEvent() call sites 1:1 (payload shapes there are the
-// source of truth); update this alongside any new kind/payload field.
-// Returns null when there's nothing worth showing (no events yet, or a kind/
-// shape this hasn't been taught about) so SessionRow can render no line at
-// all rather than a placeholder.
-function describeLatestEvent(
-  events: NotificationEvent[] | undefined,
-): { text: string; attention: boolean } | null {
-  const event = events?.at(-1);
-  if (!event) return null;
-
+// Single-event half of describeLatestEvent below — pulled apart so the
+// "walk backward until one describes" fallback there can call this per
+// candidate event without duplicating the switch. Mirrors pty-manager.ts's
+// emitEvent() call sites 1:1 (payload shapes there are the source of
+// truth); update this alongside any new kind/payload field. Returns null
+// when this specific event's kind/shape isn't one this has been taught
+// about yet.
+function describeEvent(event: NotificationEvent): { text: string; attention: boolean } | null {
   switch (event.kind) {
     case "attention": {
       if (event.payload.attention !== true) {
@@ -326,6 +320,8 @@ function describeLatestEvent(
         return { text: "No longer needs attention", attention: false };
       }
       switch (event.payload.signal) {
+        case "bell":
+          return { text: "Bell", attention: true };
         case "titleIdle":
           return { text: "Finished — needs input", attention: true };
         case "altScreenExit":
@@ -335,7 +331,7 @@ function describeLatestEvent(
         case "notification":
           return { text: "Sent a notification", attention: true };
         default:
-          // "bell", or a future signal kind this hasn't been taught yet.
+          // A future signal kind this hasn't been taught yet.
           return { text: "Needs input", attention: true };
       }
     }
@@ -356,6 +352,27 @@ function describeLatestEvent(
     default:
       return null;
   }
+}
+
+// Issue #167's per-session status line — turns the most recent describable
+// NotificationEvent for a session into a short, human-readable string plus
+// whether it should get the "attention" color treatment. Walks backward
+// from the newest event rather than only looking at the very last one: a
+// top event whose kind/shape describeEvent doesn't recognize (a future
+// payload change, or a kind this hasn't been taught about) shouldn't blank
+// the line when an earlier, still-relevant event (e.g. the last title
+// change) can still describe it — last-known-good is more useful than
+// nothing. Returns null only when NO buffered event describes (including
+// the empty/undefined case), so SessionRow can render no line at all.
+function describeLatestEvent(
+  events: NotificationEvent[] | undefined,
+): { text: string; attention: boolean } | null {
+  if (!events) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const described = describeEvent(events[i]);
+    if (described) return described;
+  }
+  return null;
 }
 
 export function SessionRow({
