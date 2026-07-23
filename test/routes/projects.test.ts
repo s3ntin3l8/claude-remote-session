@@ -104,6 +104,35 @@ describe("projects route", () => {
     await app.close();
   });
 
+  it("creates the project directory on disk on create", async () => {
+    const app = await buildApp();
+    const cwd = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mkdir-create-")), "project");
+    expect(fs.existsSync(cwd)).toBe(false);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "mkdir-test", cwd },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(fs.existsSync(cwd)).toBe(true);
+    await app.close();
+  });
+
+  it("succeeds even when mkdir fails on create", async () => {
+    const app = await buildApp();
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), "mkdir-fail-create-"));
+    const cwd = path.join(parent, "project");
+    // Create a regular file so recursive mkdir fails with ENOTDIR
+    fs.writeFileSync(cwd, "i am a file, not a directory", "utf-8");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "mkdir-fail", cwd },
+    });
+    expect(created.statusCode).toBe(201);
+    await app.close();
+  });
+
   it("rejects a project missing cwd", async () => {
     const app = await buildApp();
     const res = await app.inject({
@@ -174,6 +203,50 @@ describe("projects route", () => {
       });
       expect(patched.statusCode).toBe(200);
       expect(patched.json().cwd).toBe(path.join(os.homedir(), "code/edited-project"));
+
+      await app.close();
+    });
+
+    it("creates the project directory on disk on update", async () => {
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "mkdir-update", cwd: "/tmp/mkdir-update-init" },
+      });
+      const { id } = created.json();
+      const newCwd = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mkdir-update-")), "project");
+      expect(fs.existsSync(newCwd)).toBe(false);
+
+      const patched = await app.inject({
+        method: "PATCH",
+        url: `/api/projects/${id}`,
+        payload: { cwd: newCwd },
+      });
+      expect(patched.statusCode).toBe(200);
+      expect(fs.existsSync(newCwd)).toBe(true);
+
+      await app.close();
+    });
+
+    it("succeeds even when mkdir fails on update", async () => {
+      const app = await buildApp();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "mkdir-fail-update", cwd: "/tmp/mkdir-fail-update-init" },
+      });
+      const { id } = created.json();
+      const parent = fs.mkdtempSync(path.join(os.tmpdir(), "mkdir-fail-update-"));
+      const newCwd = path.join(parent, "project");
+      fs.writeFileSync(newCwd, "i am a file, not a directory", "utf-8");
+
+      const patched = await app.inject({
+        method: "PATCH",
+        url: `/api/projects/${id}`,
+        payload: { cwd: newCwd },
+      });
+      expect(patched.statusCode).toBe(200);
 
       await app.close();
     });

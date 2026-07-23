@@ -1,4 +1,6 @@
 import type { FastifyInstance } from "fastify";
+import fs from "node:fs";
+import path from "node:path";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { projects, sessions } from "../db/schema.js";
 import {
@@ -754,7 +756,7 @@ export async function projectsRoute(app: FastifyInstance) {
 
   app.post<{ Body: CreateProjectBody }>(
     "/api/projects",
-    { schema: createProjectSchema },
+    { schema: createProjectSchema, config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
     async (request, reply) => {
       const { name, cwd } = request.body;
       const hostId = request.body.hostId ?? LOCAL_HOST_ID;
@@ -768,11 +770,26 @@ export async function projectsRoute(app: FastifyInstance) {
       // "local": a remote project's cwd expands against the *agent's* own
       // home dir, not this process's — see host-registry.ts/issue #26's
       // landmine #3 — so it's stored/forwarded raw instead.
+      const resolvedCwd = hostId === LOCAL_HOST_ID ? path.resolve(expandHome(cwd)) : cwd;
       const [created] = app.db
         .insert(projects)
-        .values({ name, cwd: hostId === LOCAL_HOST_ID ? expandHome(cwd) : cwd, hostId })
+        .values({ name, cwd: resolvedCwd, hostId })
         .returning()
         .all();
+      // Best-effort: create the directory so a session spawned against this
+      // cwd doesn't fail. CodeQL flags this as js/path-injection since
+      // resolvedCwd derives from request.body.cwd — that's a false positive
+      // at this boundary: /api/projects is the authenticated-primary
+      // boundary, and a caller who can reach it can already spawn a session
+      // against an arbitrary cwd (full code execution), which is strictly
+      // more powerful than mkdir on the same path. Same trust model as
+      // internal.ts's resolveWithinRoots docstring for session-spawn cwd.
+      // The alert is dismissed as a false positive rather than suppressed.
+      if (hostId === LOCAL_HOST_ID) {
+        await fs.promises.mkdir(resolvedCwd, { recursive: true }).catch((err) => {
+          app.log.warn({ err, cwd: resolvedCwd }, "Could not create project directory");
+        });
+      }
       reply.code(201);
       return created;
     },
@@ -785,7 +802,7 @@ export async function projectsRoute(app: FastifyInstance) {
   // initial create does, rather than silently producing an unspawnable cwd.
   app.patch<{ Params: { id: string }; Body: UpdateProjectBody }>(
     "/api/projects/:id",
-    { schema: updateProjectSchema },
+    { schema: updateProjectSchema, config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
     async (request, reply) => {
       const projectId = Number(request.params.id);
       if (!Number.isInteger(projectId)) return reply.badRequest("Invalid project id");
@@ -802,19 +819,30 @@ export async function projectsRoute(app: FastifyInstance) {
         return reply.badRequest("devServerUrl must be a 1-65535 port or a valid http(s) URL");
       }
 
+      const resolvedCwd =
+        cwd !== undefined && existing.hostId === LOCAL_HOST_ID
+          ? path.resolve(expandHome(cwd))
+          : cwd;
       const updated = app.db
         .update(projects)
         .set({
           ...(name !== undefined ? { name } : {}),
-          ...(cwd !== undefined
-            ? { cwd: existing.hostId === LOCAL_HOST_ID ? expandHome(cwd) : cwd }
-            : {}),
+          ...(cwd !== undefined ? { cwd: resolvedCwd } : {}),
           ...(devServerUrl !== undefined ? { devServerUrl } : {}),
         })
         .where(eq(projects.id, projectId))
         .returning()
         .all();
       if (updated.length === 0) return reply.notFound();
+      // Best-effort, same false-positive rationale as the POST handler
+      // above: /api/projects is the authenticated-primary boundary, so
+      // mkdir on this cwd is no more powerful than the session-spawn cwd
+      // this same caller can already reach.
+      if (cwd !== undefined && existing.hostId === LOCAL_HOST_ID && resolvedCwd !== undefined) {
+        await fs.promises.mkdir(resolvedCwd, { recursive: true }).catch((err) => {
+          app.log.warn({ err, cwd: resolvedCwd }, "Could not create project directory");
+        });
+      }
       return updated[0];
     },
   );
