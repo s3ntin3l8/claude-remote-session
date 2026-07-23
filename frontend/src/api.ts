@@ -110,6 +110,21 @@ export interface Session {
   lastTitle: string | null;
 }
 
+// Phase 1's notification event model (issue #166) — mirrors
+// src/services/pty-manager.ts's NotificationEvent 1:1. `seq` is per-session
+// (not globally unique — two different sessions can both have `seq: 1`), so
+// a consumer keys read/unread state off (sessionId, seq) together, never
+// seq alone. Streamed over the new /ws/events channel (eventsClient.ts);
+// the existing `attention`/`activity`/`lastTitle` fields on Session above
+// stay poll-derived and unchanged — this is purely additive.
+export interface NotificationEvent {
+  seq: number;
+  sessionId: number;
+  kind: "attention" | "status_change" | "title_change";
+  ts: number;
+  payload: Record<string, unknown>;
+}
+
 export interface Workspace {
   id: number;
   name: string;

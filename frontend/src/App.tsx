@@ -178,6 +178,7 @@ export function App() {
     settings,
     notificationsEnabled,
     startLiveRefresh,
+    startEventsStream,
     hydrateSettings,
     startThemeWatch,
     sidebarCollapsed,
@@ -592,6 +593,12 @@ export function App() {
   // Starts the ~4s session-status poll once (paused while the tab is
   // hidden) so status badges reflect the backend without a mutation.
   useEffect(() => startLiveRefresh(), [startLiveRefresh]);
+
+  // Connects the single /ws/events push channel once (issue #166) — not
+  // per-pane, unlike TerminalPane.tsx's own per-session WS. Additive
+  // alongside the poll above, which stays exactly as-is; nothing in this PR
+  // yet renders from the resulting `events` store slice.
+  useEffect(() => startEventsStream(), [startEventsStream]);
 
   // Fetches the server-persisted Settings blob once on mount (store.ts seeds
   // sane defaults synchronously so nothing blocks on this) and starts

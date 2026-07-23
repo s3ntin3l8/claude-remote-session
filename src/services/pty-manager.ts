@@ -83,6 +83,31 @@ export interface SessionInfo {
 type DataListener = (chunk: Buffer) => void;
 type ExitListener = () => void;
 
+// Phase 1's notification event model (issue #166) — a structured, replayable
+// record of the byte-driven "something happened" moments a session produces,
+// distinct from `SessionInfo`'s poll-derived snapshot fields above. `seq` is
+// per-session and monotonic (starts at 1), not globally unique — a consumer
+// keys read/unread state off (sessionId, seq) together, never seq alone
+// (two different sessions both legitimately have a seq:1). `kind` is
+// deliberately a small closed set for this PR; the roadmap's later phases
+// extend it (`file_change`, `review_gate`, ...) without needing a shape
+// change here. Deliberately does NOT include a `working`/`idle` kind — see
+// Session.onData's own comment on why activity stays poll-derived.
+export interface NotificationEvent {
+  seq: number;
+  sessionId: number;
+  kind: "attention" | "status_change" | "title_change";
+  ts: number;
+  payload: Record<string, unknown>;
+}
+
+type EventListener = (event: NotificationEvent) => void;
+
+// Cap on each session's own event ring buffer — mirrors SCROLLBACK_MAX_BYTES's
+// FIFO-eviction shape (pushScrollback below) but bounded by count rather than
+// bytes, since events are small structured records, not raw terminal bytes.
+const EVENTS_MAX = 100;
+
 // Enough for a healthy amount of scrollback history, not just "the last
 // screen" — raised from the original 256KiB (issue #83) because that cap and
 // xterm's own line-based scrollback (DEFAULT_SETTINGS.terminal.scrollback in
@@ -247,6 +272,22 @@ export class Session {
   private nudgeTimer: ReturnType<typeof setTimeout> | null = null;
   private dataListeners = new Set<DataListener>();
   private exitListeners = new Set<ExitListener>();
+  private eventListeners = new Set<EventListener>();
+  // This session's own notification-event ring buffer (issue #166) — same
+  // FIFO-eviction shape as scrollback above, capped by count (EVENTS_MAX)
+  // rather than bytes. `eventSeq` is monotonic per-session, never reset or
+  // reused, so a client's read cursor (lastSeenSeq below) only ever needs to
+  // compare against it, never worry about wraparound within a session's
+  // lifetime.
+  private events: NotificationEvent[] = [];
+  private eventSeq = 0;
+  // The read cursor for this session's event stream (issue #166's shared
+  // read/unread primitive future PRs — 1.3's tab badges, 1.4's event feed —
+  // both reuse): unread = events with seq > lastSeenSeq. Advanced only via
+  // markEventsSeen(), driven by a client's "seen" WS message
+  // (routes/events.ts). Starts at 0 so every event a session has ever
+  // produced is initially unread.
+  private lastSeenSeq = 0;
   private lastActivityAt: number | null = null;
   private activityStreakStart: number | null = null;
   private attentionAt: number | null = null;
@@ -438,7 +479,20 @@ export class Session {
       // duplicate the carried bytes in the replayed stream).
       const detectChunk = this.detectCarry + data;
       const altScreenSwitch = detectAltScreenSwitch(detectChunk);
-      if (altScreenSwitch !== null) this.inAltScreen = altScreenSwitch === "alt";
+      if (altScreenSwitch !== null) {
+        // Transition-guarded (issue #166): detectAltScreenSwitch reports the
+        // switch a chunk landed on even when that's the same mode already
+        // tracked (e.g. two back-to-back "enter alt" sequences with no exit
+        // between them, or a chunk that happens to re-assert the current
+        // mode) — only emit a status_change event on a genuine flip, so a
+        // chatty program can't spam this session's 100-slot event ring
+        // buffer with no-op repeats.
+        const nowInAltScreen = altScreenSwitch === "alt";
+        if (nowInAltScreen !== this.inAltScreen) {
+          this.inAltScreen = nowInAltScreen;
+          this.emitEvent("status_change", { screen: altScreenSwitch });
+        }
+      }
       this.mouseTracking = applyMouseModeChanges(detectChunk, this.mouseTracking);
       this.detectCarry = carryPartialEscape(detectChunk);
 
@@ -448,6 +502,11 @@ export class Session {
       if (this.attentionAt !== null && this.lastActivityAt !== null) {
         if (Date.now() - this.lastActivityAt < ATTENTION_CLEAR_WINDOW_MS) {
           this.attentionAt = null;
+          // Issue #166: the clear is itself a byte-driven transition (the
+          // NEXT chunk arriving is what proves the earlier bell was
+          // work-in-progress, not a real "waiting for input" state) — emit
+          // it the same way the initial set below does.
+          this.emitEvent("attention", { attention: false });
         }
       }
 
@@ -461,8 +520,28 @@ export class Session {
       this.lastActivityAt = now;
 
       const signals = detectAttentionSignals(data);
-      if (signals.bell || signals.notification) this.attentionAt = Date.now();
-      if (signals.titleChange !== null) this.lastTitle = signals.titleChange;
+      if (signals.bell || signals.notification) {
+        // Transition-guarded: a session already flagged for attention that
+        // sees ANOTHER bell/notification before anything clears the first
+        // one is still just "still needs attention," not a new transition —
+        // only the initial set (false -> true) is byte-driven-transition
+        // worthy of its own event (issue #166).
+        const wasAttention = this.attentionAt !== null;
+        this.attentionAt = Date.now();
+        if (!wasAttention) {
+          this.emitEvent("attention", {
+            attention: true,
+            bell: signals.bell,
+            notification: signals.notification,
+          });
+        }
+      }
+      if (signals.titleChange !== null) {
+        if (signals.titleChange !== this.lastTitle) {
+          this.emitEvent("title_change", { title: signals.titleChange });
+        }
+        this.lastTitle = signals.titleChange;
+      }
 
       for (const listener of this.dataListeners) listener(chunk);
     });
@@ -481,6 +560,13 @@ export class Session {
       // handler is the only place that path passes through before a later
       // respawn's first chunk arrives.
       this.detectCarry = "";
+      // Issue #166: mirrors terminal.ts's own onExit handler, which sends a
+      // `{type:"exited"}` control message to every attached browser socket
+      // on this exact same event regardless of whether the client died from
+      // an explicit detach (kill()) or the program genuinely exiting on its
+      // own — same "attach-client death is treated uniformly" posture, kept
+      // consistent here rather than trying to discriminate the two causes.
+      this.emitEvent("status_change", { reason: "exited" });
       for (const listener of this.exitListeners) listener();
     });
 
@@ -573,6 +659,59 @@ export class Session {
       this.nudgeTimer = null;
     }
     if (this.suppressScrollback) this.suppressScrollback = false;
+  }
+
+  /**
+   * Record a notification event into this session's ring buffer and fan it
+   * out to live subscribers (mirrors pushScrollback's FIFO-eviction shape
+   * and dataListeners' fan-out shape respectively). Only ever called from
+   * genuinely byte-driven (or exit-driven) transitions — see onData/onExit
+   * below — never from a poll, so callers don't need their own dedup: each
+   * call site already only calls this when its own tracked state actually
+   * changed.
+   */
+  private emitEvent(kind: NotificationEvent["kind"], payload: Record<string, unknown>): void {
+    this.eventSeq += 1;
+    const event: NotificationEvent = {
+      seq: this.eventSeq,
+      sessionId: Number(this.id),
+      kind,
+      ts: Date.now(),
+      payload,
+    };
+    this.events.push(event);
+    if (this.events.length > EVENTS_MAX) this.events.shift();
+    for (const listener of this.eventListeners) listener(event);
+  }
+
+  /** Subscribe to this session's own notification events as they're emitted
+   * — mirrors onData()/onExit()'s Set<listener> + unsubscribe-closure shape.
+   * PtyManager (below) is the only caller: it subscribes once per session
+   * (in getOrCreate) and re-emits through its own manager-level onEvent()
+   * fan-out, the same one-layer-up relationship dataListeners has to
+   * routes/terminal.ts's per-session subscriptions — except here the
+   * manager itself is the aggregation point, not each route call. */
+  onEvent(listener: EventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
+  /** Everything currently buffered for this session, oldest first — replay
+   * this (alongside every other tracked session's own buffer) to a newly
+   * connecting /ws/events client. Mirrors getScrollback()'s "replay on
+   * connect" role, just for structured events instead of raw bytes. */
+  getEvents(): NotificationEvent[] {
+    return [...this.events];
+  }
+
+  /** Advance this session's read cursor to `seq` (a no-op if `seq` is behind
+   * the cursor already — e.g. a duplicate or out-of-order "seen" message).
+   * Never rejects an out-of-range seq outright: a client-supplied cursor
+   * ahead of what this process has ever emitted (e.g. right after a
+   * restart wiped the in-memory ring buffer but the client's own
+   * last-known seq survived) is harmless to just accept. */
+  markEventsSeen(seq: number): void {
+    if (seq > this.lastSeenSeq) this.lastSeenSeq = seq;
   }
 
   private pushScrollback(chunk: Buffer): void {
@@ -736,6 +875,13 @@ export class Session {
 export class PtyManager {
   private sessions = new Map<string, Session>();
   private readonly sessionsDir: string;
+  // Manager-level fan-out (issue #166) — mirrors dataListeners/onData()'s
+  // Set<listener> + unsubscribe-closure shape, just one layer up: each
+  // Session emits to its OWN eventListeners set (above), and getOrCreate()
+  // below subscribes once per session to re-emit into this aggregated set,
+  // the single subscription point routes/events.ts's /ws/events needs to
+  // see every session's events without subscribing to each one individually.
+  private eventListeners = new Set<EventListener>();
 
   constructor(opts: { sessionsDir: string }) {
     // Must be absolute: dtach is spawned with cwd set to the *session's*
@@ -767,6 +913,15 @@ export class PtyManager {
         cols: opts.cols,
         rows: opts.rows,
       });
+      // Subscribed exactly once, at creation — re-emits every event this
+      // brand-new session ever produces into the manager-level fan-out
+      // above, for as long as this process runs (never unsubscribed; a
+      // Session's own eventListeners set only otherwise loses subscribers
+      // via a WS route's unsubscribe closure, which this internal one never
+      // is).
+      session.onEvent((event) => {
+        for (const listener of this.eventListeners) listener(event);
+      });
       this.sessions.set(opts.id, session);
     }
     if (!session.isAlive) {
@@ -781,6 +936,30 @@ export class PtyManager {
 
   list(): SessionInfo[] {
     return [...this.sessions.values()].map((s) => s.toInfo());
+  }
+
+  /** Subscribe to every tracked session's notification events, present and
+   * future — see the eventListeners field doc comment above. Returns an
+   * unsubscribe closure, mirroring every other listener registration in
+   * this file. */
+  onEvent(listener: EventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
+  /** Every currently-buffered event across every tracked session (alive or
+   * not — a session's final `status_change` "exited" event is exactly the
+   * kind of thing a client connecting moments later still wants to see),
+   * unsorted. Callers (routes/events.ts) sort/cap this for replay. */
+  listEvents(): NotificationEvent[] {
+    return [...this.sessions.values()].flatMap((s) => s.getEvents());
+  }
+
+  /** Advance a tracked session's read cursor — a no-op (not an error) for an
+   * id this process isn't tracking, the same "unknown id is harmless" shape
+   * as every other per-id lookup in this class (e.g. get()). */
+  markEventsSeen(id: string, seq: number): void {
+    this.sessions.get(id)?.markEventsSeen(seq);
   }
 
   /** Kill our tracked attach-client only (detach); the dtach master + program survive. */

@@ -804,6 +804,72 @@ describe("internal routes (agent role, issue #26)", () => {
     await app.close();
   });
 
+  describe("/internal/ws/events (issue #166's multi-host twin — the agent-side half)", () => {
+    it("rejects a connection with no Authorization header", async () => {
+      const { app, port } = await buildAndListen();
+
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/internal/ws/events`);
+      const outcome = await waitForOpenOrClose(ws);
+      expect(outcome).toBe("close");
+
+      await app.close();
+    });
+
+    it("replays buffered events then streams live ones, using the same shared core as /ws/events", async () => {
+      const { app, port } = await buildAndListen();
+
+      // Numeric-looking id — matches production reality (a session id on
+      // the agent side is always the primary's stringified DB row id, see
+      // sessions.ts's spawn() call), and NotificationEvent.sessionId is
+      // typed `number` (pty-manager.ts), derived via Number(this.id).
+      // fakePtyChildren accumulates across every test in this file — snapshot
+      // its length first (same pattern the /internal/ws/attach test above
+      // uses) so `pty` below is genuinely THIS test's own session, not a
+      // stale one left over from an earlier test.
+      const before = fakePtyChildren.length;
+      const spawn = await app.inject({
+        method: "POST",
+        url: "/internal/sessions",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { id: "77", cwd: "/tmp", command: "bash", cols: 80, rows: 24 },
+      });
+      expect(spawn.statusCode).toBe(201);
+      await waitUntil(() => fakePtyChildren.length > before);
+      const pty = fakePtyChildren[fakePtyChildren.length - 1];
+
+      // Emitted before the WS connects — must still appear in the replay
+      // batch (mirrors events.test.ts's own local-route replay assertion).
+      pty.emitData("\x1b]2;working\x07");
+
+      const ws = new NodeWebSocket(`ws://127.0.0.1:${port}/internal/ws/events`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      const messages: Array<{ sessionId: number; kind: string; payload: Record<string, unknown> }> =
+        [];
+      ws.on("message", (data) => {
+        messages.push(JSON.parse(data.toString("utf8")));
+      });
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("close", () => reject(new Error("WS closed instead of opening")));
+        ws.once("error", reject);
+      });
+
+      await waitUntil(() => messages.length > 0);
+      expect(messages[0]).toMatchObject({
+        sessionId: 77,
+        kind: "title_change",
+        payload: { title: "working" },
+      });
+
+      pty.emitData("done\x07");
+      await waitUntil(() => messages.some((m) => m.kind === "attention"));
+
+      ws.close();
+      await app.close();
+    });
+  });
+
   describe("/internal/preview* (issue #28 phase 6 — the agent's own loopback-only proxy half)", () => {
     let stubHttpServer: http.Server;
     let stubWss: WebSocketServer;
