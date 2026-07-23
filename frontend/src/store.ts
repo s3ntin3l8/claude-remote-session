@@ -20,6 +20,7 @@ import type {
 import type { ReorderUpdate } from "./reorder.js";
 import { deepMerge, mergePartialPatch } from "./settingsMerge.js";
 import { connectEventsStream, type EventsClientHandle } from "./eventsClient.js";
+import type { KanbanColumnId } from "./kanban.js";
 
 // Which workspace was last active survives a reload via localStorage (not
 // the DB — it's a per-browser UI preference, not shared server state).
@@ -289,7 +290,7 @@ interface DashboardState {
   // session ids — sessions not yet present in the array (new arrivals) are
   // appended at the end by KanbanBoard's own ordering helper, not stored
   // here until the user actually drags them.
-  kanbanOrder: Record<string, number[]>;
+  kanbanOrder: Partial<Record<KanbanColumnId, number[]>>;
   // Design's "whole backend down" state (States doc section 04) — flips
   // false after BACKEND_UNREACHABLE_THRESHOLD consecutive session-fetch
   // failures, true again the moment one succeeds. See
@@ -411,7 +412,7 @@ interface DashboardState {
   // new array via its own computeKanbanReorder, reusing reorder.ts's
   // computeReorder for the actual reindex math) — mirrors setSidebarWidth's
   // "component computes, store just stores" shape above.
-  setKanbanColumnOrder: (columnId: string, order: number[]) => void;
+  setKanbanColumnOrder: (columnId: KanbanColumnId, order: number[]) => void;
   requestSplit: (referencePanelId: string, direction: "right" | "below") => void;
   clearSplitRequest: () => void;
   // Issue #170's counterpart to `notificationsPanelOpenRequest` above — a
