@@ -3,6 +3,8 @@ import type { FastifyInstance } from "fastify";
 
 const mockGetRepoPRsStatus = vi.hoisted(() => vi.fn());
 const mockGetToken = vi.hoisted(() => vi.fn());
+const mockResolveGitHubRepo = vi.hoisted(() => vi.fn());
+const mockGetRemoteHostClient = vi.hoisted(() => vi.fn());
 
 vi.mock("../../src/services/github.js", () => ({
   GitHubApiError: class extends Error {
@@ -25,11 +27,26 @@ vi.mock("../../src/services/git-remote.js", () => ({
   parseGitRemote: () => ({ owner: "test-owner", repo: "test-repo" }),
 }));
 
+// Remote-host resolution (issue #222) — resolveGitHubRepo is the only method
+// the poller calls on the client. HostRequestError also needs a real export
+// (not just a mock fn) since resolveRemoteRepoRef does `instanceof` on it.
+vi.mock("../../src/services/remote-host-client.js", () => ({
+  getRemoteHostClient: mockGetRemoteHostClient,
+  HostRequestError: class extends Error {
+    statusCode: number;
+    constructor(hostId: string, statusCode: number, body: string) {
+      super(`Host ${hostId} rejected the request: HTTP ${statusCode}${body ? ` — ${body}` : ""}`);
+      this.name = "HostRequestError";
+      this.statusCode = statusCode;
+    }
+  },
+}));
+
 import { startGitHubPRPoller } from "../../src/services/github-pr-poller.js";
 
 function mockApp(rows: { id: number; cwd: string; hostId: string }[]): FastifyInstance {
   return {
-    db: { select: () => ({ from: () => ({ where: () => ({ all: () => rows }) }) }) },
+    db: { select: () => ({ from: () => ({ all: () => rows }) }) },
     log: { debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
     config: { MULLION_ROLE: "primary" },
   } as unknown as FastifyInstance;
@@ -43,6 +60,9 @@ describe("startGitHubPRPoller", () => {
       prSummary: { total: 0, pass: 0, fail: 0, pending: 0 },
     });
     mockGetToken.mockReset();
+    mockResolveGitHubRepo.mockReset();
+    mockGetRemoteHostClient.mockReset();
+    mockGetRemoteHostClient.mockReturnValue({ resolveGitHubRepo: mockResolveGitHubRepo });
   });
 
   it("starts interval immediately when no local projects exist", () => {
@@ -140,6 +160,72 @@ describe("startGitHubPRPoller", () => {
 
     vi.advanceTimersByTime(300_000);
     expect(mockGetRepoPRsStatus).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("polls a remote-hosted row via the agent (issue #222)", async () => {
+    mockGetToken.mockReturnValue("ghp_token");
+    mockResolveGitHubRepo.mockResolvedValue({ owner: "remote-owner", repo: "remote-repo" });
+    const rows = [{ id: 1, cwd: "/tmp/remote", hostId: "agent-1" }];
+    const app = mockApp(rows);
+    vi.useFakeTimers();
+    const cleanup = startGitHubPRPoller(app);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(mockGetRemoteHostClient).toHaveBeenCalledWith(app, "agent-1");
+    expect(mockResolveGitHubRepo).toHaveBeenCalledWith("/tmp/remote");
+    expect(mockGetRepoPRsStatus).toHaveBeenCalledWith("ghp_token", "remote-owner", "remote-repo");
+
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("isolates an unreachable remote host so a sibling local row still gets polled (issue #222)", async () => {
+    mockGetToken.mockReturnValue("ghp_token");
+    mockResolveGitHubRepo.mockRejectedValue(new Error("fetch failed: bad port"));
+    const rows = [
+      { id: 1, cwd: "/tmp/one", hostId: "local" },
+      { id: 2, cwd: "/tmp/remote", hostId: "agent-down" },
+    ];
+    const app = mockApp(rows);
+    vi.useFakeTimers();
+    const cleanup = startGitHubPRPoller(app);
+
+    // Fire both staggered timers (local at t=0, remote at t=2000).
+    await vi.advanceTimersByTimeAsync(2_001);
+
+    // The unreachable remote row is skipped, not thrown — only the local
+    // sibling's owner/repo ever reaches getRepoPRsStatus.
+    expect(mockGetRepoPRsStatus).toHaveBeenCalledTimes(1);
+    expect(mockGetRepoPRsStatus).toHaveBeenCalledWith("ghp_token", "test-owner", "test-repo");
+    expect(app.log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ hostId: "agent-down" }),
+      expect.stringContaining("host unreachable"),
+    );
+
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("logs a distinct message when the agent rejects the request rather than being unreachable (Hermes review, PR #244)", async () => {
+    mockGetToken.mockReturnValue("ghp_token");
+    const { HostRequestError } = await import("../../src/services/remote-host-client.js");
+    mockResolveGitHubRepo.mockRejectedValue(new HostRequestError("agent-2", 400, "bad cwd"));
+    const rows = [{ id: 1, cwd: "/tmp/remote", hostId: "agent-2" }];
+    const app = mockApp(rows);
+    vi.useFakeTimers();
+    const cleanup = startGitHubPRPoller(app);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(mockGetRepoPRsStatus).not.toHaveBeenCalled();
+    expect(app.log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ hostId: "agent-2" }),
+      expect.stringContaining("agent rejected github-repo request"),
+    );
+
+    cleanup();
     vi.useRealTimers();
   });
 });
