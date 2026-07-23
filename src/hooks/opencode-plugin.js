@@ -62,21 +62,7 @@ function createSender() {
     const socket = net.createConnection(socketPath);
     let ready = false;
     const queued = [];
-    socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ token })}\n`);
-      ready = true;
-      for (const line of queued.splice(0)) {
-        if (socket.writable) socket.write(line);
-      }
-    });
-    socket.on("error", () => {
-      conn = null;
-    });
-    socket.on("close", () => {
-      conn = null;
-    });
-
-    conn = {
+    const wrapper = {
       send(message) {
         const line = `${JSON.stringify(message)}\n`;
         if (ready && socket.writable) {
@@ -86,6 +72,35 @@ function createSender() {
         }
       },
     };
+
+    // 'error' and 'close' fire on separate ticks for a TCP/Unix socket, and
+    // a mappable event arriving in between them would already have created
+    // a REPLACEMENT connection via a fresh ensureConnection() call (since
+    // this one's 'error' handler nulled `conn` first) — an unconditional
+    // `conn = null` in the later 'close' handler would then wipe out that
+    // newer, healthy connection instead of this dead one. Checking identity
+    // (`conn === wrapper`) before clearing makes this immune to that race
+    // regardless of firing order or how many times either event fires,
+    // unlike a one-shot "already handled" boolean, which only guards
+    // against a second event on the SAME socket, not against a second
+    // socket having since taken over.
+    const forget = () => {
+      if (conn === wrapper) conn = null;
+    };
+    socket.on("connect", () => {
+      socket.write(`${JSON.stringify({ token })}\n`);
+      ready = true;
+      for (const line of queued.splice(0)) {
+        if (socket.writable) socket.write(line);
+      }
+    });
+    socket.on("error", () => {
+      forget();
+      socket.destroy();
+    });
+    socket.on("close", forget);
+
+    conn = wrapper;
     return conn;
   }
 
