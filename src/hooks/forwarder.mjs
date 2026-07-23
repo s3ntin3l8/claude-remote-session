@@ -7,9 +7,10 @@
 //   node <this file> <agent> <kind>
 //
 // with the hook's own JSON payload on stdin. Reads stdin, maps it (via
-// forwarder-core.mjs's pure per-agent dialect) to a hook-protocol message,
-// connects to $MULLION_HOOK_SOCKET, sends the handshake + message line, and
-// exits. Deliberately plain JavaScript, not TypeScript: this file is spawned
+// forwarder-core.mjs's pure per-agent dialect) to hook-protocol message(s),
+// connects to $MULLION_HOOK_SOCKET, sends the handshake + one or more
+// message lines, and exits. Deliberately plain JavaScript, not TypeScript:
+// this file is spawned
 // directly by an external agent's own hook runner, not imported by Mullion's
 // server process, so it must run identically under `make dev` (tsx never
 // touches it — there is no dist/ yet) and in production (`make build` copies
