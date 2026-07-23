@@ -13,6 +13,12 @@ function jsonResponse(status: number, body: unknown) {
   });
 }
 
+// Captured before any test stubs globalThis.fetch — lets the remote-host
+// success test (issue #222) delegate real loopback calls to its own
+// in-process agent server through the same fetchMock that mocks
+// api.github.com, instead of needing genuine internet access.
+const realFetch = globalThis.fetch;
+
 const tmpDb = path.join(os.tmpdir(), `projects-test-${process.pid}.db`);
 
 describe("projects route", () => {
@@ -868,7 +874,10 @@ describe("projects route", () => {
       await app.close();
     });
 
-    it("204s for remote-hosted projects (remote host unreachable) — Phase 1 skip", async () => {
+    it("503s for a project on an unreachable remote host (issue #222)", async () => {
+      // Same pattern as the /github route's own unreachable-host test above:
+      // a real (failing) connection attempt to 127.0.0.1:1, not the
+      // api.github.com fetch mock this describe's beforeEach installs.
       vi.unstubAllGlobals();
 
       const app = await buildApp();
@@ -887,9 +896,113 @@ describe("projects route", () => {
         method: "GET",
         url: `/api/projects/${project.json().id}/github/prs`,
       });
-      expect(res.statusCode).toBe(204);
+      expect(res.statusCode).toBe(503);
 
       await app.close();
+    });
+
+    it("returns per-PR status for a remote-hosted project via the agent (issue #222)", async () => {
+      // Full round trip: a real listening agent resolves owner/repo from
+      // its own filesystem via /internal/github-repo, the primary reads the
+      // warm prsCache (populated here the same way the poller would) keyed
+      // by that owner/repo, and returns it — same as the local-project test
+      // above, but with the repoRef resolved over the wire instead of via
+      // parseGitRemote(project.cwd) directly. fetchMock still handles the
+      // github.com token-validation call (like every other test here), but
+      // delegates real 127.0.0.1 calls to the actual fetch so the primary's
+      // RemoteHostClient can genuinely reach the agent below.
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "https://api.github.com/user") {
+          return Promise.resolve(jsonResponse(200, { login: "octocat" }));
+        }
+        if (url.startsWith("http://127.0.0.1:")) {
+          return realFetch(input, init);
+        }
+        return Promise.reject(new Error(`unexpected fetch in test: ${url}`));
+      });
+
+      const remoteCwd = fs.mkdtempSync(path.join(os.tmpdir(), "projects-prs-remote-"));
+      fs.mkdirSync(path.join(remoteCwd, ".git"));
+      fs.writeFileSync(
+        path.join(remoteCwd, ".git", "config"),
+        '[remote "origin"]\n\turl = git@github.com:remote/pr-repo.git\n',
+      );
+
+      const AGENT_TOKEN = "prs-remote-agent-token";
+      const prevEnv: Record<string, string | undefined> = {};
+      const agentEnv = {
+        MULLION_ROLE: "agent",
+        MULLION_AGENT_TOKEN: AGENT_TOKEN,
+        PROJECTS_ROOTS: os.tmpdir(),
+      };
+      for (const key of Object.keys(agentEnv)) {
+        prevEnv[key] = process.env[key];
+        process.env[key] = agentEnv[key as keyof typeof agentEnv];
+      }
+      const agentApp = await buildApp();
+      for (const key of Object.keys(agentEnv)) {
+        if (prevEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = prevEnv[key];
+      }
+      await agentApp.listen({ port: 0, host: "127.0.0.1" });
+      const address = agentApp.server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("expected a real bound address");
+      }
+
+      const primary = await buildApp();
+      await primary.inject({
+        method: "PUT",
+        url: "/api/integrations/github/token",
+        payload: { token: "ghp_remote_prs_token" },
+      });
+      const host = await primary.inject({
+        method: "POST",
+        url: "/api/hosts",
+        payload: {
+          name: "prs-remote-success-host",
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          token: AGENT_TOKEN,
+        },
+      });
+      const project = await primary.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "remote-prs-success", cwd: remoteCwd, hostId: host.json().id },
+      });
+
+      const { setRepoPRsStatus } = await import("../../src/services/github.js");
+      setRepoPRsStatus("remote", "pr-repo", {
+        prs: [
+          {
+            number: 3,
+            title: "Remote PR",
+            htmlUrl: "https://github.com/remote/pr-repo/pull/3",
+            author: "dev",
+            headSha: "def",
+            headBranch: "remote-branch",
+            baseBranch: "main",
+            ciStatus: "success",
+            actionsRuns: [],
+          },
+        ],
+        prSummary: { total: 1, pass: 1, fail: 0, pending: 0 },
+      });
+
+      const res = await primary.inject({
+        method: "GET",
+        url: `/api/projects/${project.json().id}/github/prs`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.prs).toHaveLength(1);
+      expect(body.prs[0].number).toBe(3);
+      expect(body.prSummary).toEqual({ total: 1, pass: 1, fail: 0, pending: 0 });
+
+      fs.rmSync(remoteCwd, { recursive: true, force: true });
+      await primary.close();
+      await agentApp.close();
     });
   });
 

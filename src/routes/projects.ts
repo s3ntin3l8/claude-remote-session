@@ -437,10 +437,19 @@ export async function projectsRoute(app: FastifyInstance) {
       if (project.hostId === LOCAL_HOST_ID) {
         repoRef = parseGitRemote(project.cwd);
       } else {
-        // Remote-hosted projects are skipped in Phase 1 (issue #102, see
-        // the follow-up issue for remote-hosted GitHub status support).
-        reply.code(204);
-        return;
+        // Remote-hosted projects (issue #222, follow-up to #102): resolve
+        // owner/repo via the agent, same as the /github endpoint above. The
+        // per-PR cache is still keyed by owner/repo and populated by the
+        // primary-side poller — this route only needs the ref to look it up.
+        try {
+          repoRef = await getRemoteHostClient(app, project.hostId).resolveGitHubRepo(project.cwd);
+        } catch (err) {
+          app.log.warn(
+            { hostId: project.hostId, err },
+            "host unreachable, github prs status unavailable",
+          );
+          return reply.serviceUnavailable(`Host ${project.hostId} is unreachable`);
+        }
       }
       if (!repoRef) {
         reply.code(204);
