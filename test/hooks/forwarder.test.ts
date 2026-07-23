@@ -81,6 +81,30 @@ function runForwarder(
   });
 }
 
+/** Same as runForwarder, but captures stdout — for agy's Stop contract
+ * (issue #253), which expects a JSON decision object on stdout even for a
+ * purely observational hook. */
+function runForwarderCapturingStdout(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  stdin: string,
+): Promise<{ code: number | null; stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [FORWARDER_PATH, ...args], {
+      env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => resolve({ code, stdout }));
+    child.stdin.write(stdin);
+    child.stdin.end();
+  });
+}
+
 describe("forwarder.mjs (issue #174)", () => {
   let dir: string;
   let server: net.Server | null = null;
@@ -174,5 +198,33 @@ describe("forwarder.mjs (issue #174)", () => {
     expect(JSON.parse(handshakeLine)).toEqual({ token: "tok-123" });
     expect(JSON.parse(firstFile)).toEqual({ kind: "file_change", path: "a.ts", action: "create" });
     expect(JSON.parse(secondFile)).toEqual({ kind: "file_change", path: "b.ts", action: "delete" });
+  });
+
+  it("always prints an empty JSON object to stdout — agy's Stop hooks run synchronously and expect a decision (issue #253)", async () => {
+    dir = mkdtempSync(path.join(os.tmpdir(), "mullion-forwarder-"));
+    const socketPath = path.join(dir, "hooks.sock");
+    server = await listen(socketPath);
+    const linesPromise = collectLines(server, 2);
+
+    const { code, stdout } = await runForwarderCapturingStdout(
+      ["agy", "Stop"],
+      { MULLION_HOOK_SOCKET: socketPath, MULLION_HOOK_TOKEN: "tok-123" },
+      "{}",
+    );
+    expect(code).toBe(0);
+    expect(stdout.trim()).toBe("{}");
+
+    const [, messageLine] = await linesPromise;
+    expect(JSON.parse(messageLine)).toEqual({ kind: "progress", phase: "done" });
+  });
+
+  it("still prints an empty JSON object to stdout even with no socket configured at all", async () => {
+    const { code, stdout } = await runForwarderCapturingStdout(
+      ["agy", "Stop"],
+      { MULLION_HOOK_SOCKET: "", MULLION_HOOK_TOKEN: "" },
+      "{}",
+    );
+    expect(code).toBe(0);
+    expect(stdout.trim()).toBe("{}");
   });
 });

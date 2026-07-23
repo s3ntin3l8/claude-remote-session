@@ -4,17 +4,18 @@ import type { HookAdapterContext, HookAgentAdapter } from "./types.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { openCodeAdapter } from "./opencode.js";
 import { codexAdapter } from "./codex.js";
+import { agyAdapter } from "./agy.js";
 
 export type { HookAdapterContext, HookAgentAdapter, HookLaunchPlan } from "./types.js";
 export { resolveForwarderPath, resolveOpenCodePluginPath } from "./shared.js";
 
 // Registered in dependency-sequence order per the plan (Claude Code in PR4;
-// OpenCode in PR5; Codex here in PR6; agy follows in its own PR reusing
-// this same framework + the shared forwarder). Order only matters in that
-// the first match wins — each adapter's `matches()` is conservative enough
-// that two adapters matching the same command is not expected to happen in
-// practice.
-const ADAPTERS: HookAgentAdapter[] = [claudeCodeAdapter, openCodeAdapter, codexAdapter];
+// OpenCode in PR5; Codex in PR6; agy here in PR7 — all reusing this same
+// framework, Claude Code/Codex/agy also sharing the forwarder). Order only
+// matters in that the first match wins — each adapter's `matches()` is
+// conservative enough that two adapters matching the same command is not
+// expected to happen in practice.
+const ADAPTERS: HookAgentAdapter[] = [claudeCodeAdapter, openCodeAdapter, codexAdapter, agyAdapter];
 
 export interface AppliedHooks {
   /** The command to actually spawn — unchanged unless an adapter's
@@ -56,8 +57,8 @@ export function applyHookAdapters(
     }
     if (plan.managedInstall) {
       // Fire-and-forget from this synchronous seam's point of view: a
-      // managed install (Codex today; agy in a follow-up PR) touches the
-      // agent's own REAL config location, not this session's spawn.
+      // managed install (Codex, agy) touches the agent's own REAL config
+      // location, not this session's spawn.
       // `Promise.resolve().then(() => plan.managedInstall())`, NOT
       // `Promise.resolve(plan.managedInstall())` — the call itself must
       // happen inside the microtask, so an adapter whose managedInstall

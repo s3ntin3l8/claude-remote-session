@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Shared shell-command-hook forwarder (issue #174) — invoked by every
-// shell-command-hook agent's generated config (Claude Code and Codex today;
-// agy reuses this same file in a follow-up PR, see the plan's Cross-cutting
-// "Forwarder" section) as:
+// shell-command-hook agent's generated config (Claude Code, Codex, and agy
+// — see the plan's Cross-cutting "Forwarder" section) as:
 //
 //   node <this file> <agent> <kind>
 //
@@ -46,6 +45,20 @@ function readStdin() {
 }
 
 async function main() {
+  // Some agents (agy — issue #253) run hooks SYNCHRONOUSLY, blocking their
+  // own agent loop on this process's exit, and expect a JSON decision
+  // object on stdout even for a purely observational hook (an empty `{}`
+  // means "no decision" — never blocks/continues anything). Printed
+  // unconditionally, on every exit path: harmless for Claude Code/Codex,
+  // whose own hook contracts don't require (or forbid) any stdout output.
+  try {
+    await forward();
+  } finally {
+    console.log("{}");
+  }
+}
+
+async function forward() {
   const agent = process.argv[2];
   const kind = process.argv[3];
   const socketPath = process.env.MULLION_HOOK_SOCKET;

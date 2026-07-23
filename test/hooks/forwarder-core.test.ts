@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildForwarderMessage,
+  mapAgyEvent,
   mapClaudeCodeEvent,
   mapClaudeCodeNotification,
   mapClaudeCodePostToolUse,
@@ -186,6 +187,20 @@ describe("mapCodexEvent", () => {
   });
 });
 
+describe("mapAgyEvent (issue #253)", () => {
+  it("maps Stop to a done progress message", () => {
+    expect(mapAgyEvent("Stop")).toEqual({ kind: "progress", phase: "done" });
+  });
+
+  it("returns null for PostToolUse — deliberately not wired up (unverified payload shape)", () => {
+    expect(mapAgyEvent("PostToolUse")).toBeNull();
+  });
+
+  it("returns null for an unrecognized kind", () => {
+    expect(mapAgyEvent("PreInvocation")).toBeNull();
+  });
+});
+
 describe("buildForwarderMessage", () => {
   it("dispatches to the claude-code dialect", () => {
     expect(buildForwarderMessage("claude-code", "Stop", {})).toEqual({
@@ -196,6 +211,10 @@ describe("buildForwarderMessage", () => {
 
   it("dispatches to the codex dialect", () => {
     expect(buildForwarderMessage("codex", "Stop", {})).toEqual({ kind: "progress", phase: "done" });
+  });
+
+  it("dispatches to the agy dialect", () => {
+    expect(buildForwarderMessage("agy", "Stop", {})).toEqual({ kind: "progress", phase: "done" });
   });
 
   it("returns null for an unknown agent", () => {

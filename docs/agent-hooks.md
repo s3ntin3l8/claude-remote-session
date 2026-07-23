@@ -158,17 +158,54 @@ hook firing without a live, paid model turn. The extractor is defensive
 (an unrecognized format yields no messages, never throws), and this is
 called out as a known gap for whoever verifies it against a live session.
 
-agy (Antigravity CLI) gets its own adapter reusing the shared
-socket/forwarder in a follow-up PR (issue #253).
+**agy** (Antigravity CLI) also reuses the shared forwarder (`agy` as its
+agent argv), registering only `Stop` (→ `progress: done`). Config location
+and schema were both verified against agy's own bundled documentation
+(the `agy-customizations` skill's `docs/hooks.md`, shipped with the
+installed CLI) rather than guessed — two corrections to the original plan:
 
-### Removing Codex's managed hooks
+- The **global** config location is `~/.gemini/config/hooks.json` (the
+  plan guessed `~/.gemini/antigravity-cli/hooks.json`), following the same
+  customization-root convention agy's own `plugins.json`/`skills.json`
+  use.
+- The **schema** is unlike Claude Code/Codex: top-level keys are arbitrary
+  hook NAMES (no `"hooks"` wrapper), and `Stop` specifically is a FLAT
+  array of handler objects (`PreToolUse`/`PostToolUse` use the familiar
+  `{matcher, hooks: [...]}` grouped form, but `Stop` doesn't).
 
-Open `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) and delete the
-`Stop`/`PostToolUse` hook group(s) whose `command` references a
-`forwarder.mjs` path — each entry also carries a `"statusMessage"` of
-`"Mullion agent-hook forwarder — safe to remove, see docs/agent-hooks.md"`
-so it's identifiable without cross-referencing this file. Any other hook
-groups in that file are Mullion's to leave alone, never to touch.
+No documented hook-trust gate exists for agy (unlike Codex) — a managed,
+idempotent merge into the real `~/.gemini/config/hooks.json` (keyed by a
+Mullion-owned hook name, `mullion-hook-forwarder`, never disturbing any
+other hook the user configured) auto-fires with no interactive step
+required.
+
+`PostToolUse` (→ `file_change`) is **deliberately not wired up for agy**,
+unlike every other adapter: agy's own documented `PostToolUse` payload
+example shows only `{stepIdx, error, ...common fields}` — no tool name or
+arguments field at all, so there's no verified field to extract a file path
+from. Unlike Codex's `apply_patch` header format (a well-known public
+format this PR could at least ground a parser in), inventing field names
+here would be a pure guess with zero evidence. Left for a follow-up once
+the real payload shape is confirmed against a live hook firing.
+
+Because agy's hooks run **synchronously**, blocking its own agent loop
+until each hook command exits, and its `Stop` contract expects a JSON
+decision object on stdout, the shared forwarder now always prints `{}` to
+stdout right before exiting (harmless for Claude Code/Codex, which don't
+require or forbid any stdout output).
+
+### Removing managed hooks
+
+- **Codex** — open `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) and
+  delete the `Stop`/`PostToolUse` hook group(s) whose `command` references
+  a `forwarder.mjs` path — each entry also carries a `"statusMessage"` of
+  `"Mullion agent-hook forwarder — safe to remove, see docs/agent-hooks.md"`
+  so it's identifiable without cross-referencing this file.
+- **agy** — open `~/.gemini/config/hooks.json` and delete the top-level
+  `"mullion-hook-forwarder"` key.
+
+Any other hooks in either file are Mullion's to leave alone, never to
+touch.
 
 ## Security notes
 

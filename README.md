@@ -135,11 +135,13 @@ curl localhost:3000/api/projects
   `url-guard` (browser previews + their SSRF guards — see
   [`docs/browser-previews.md`](docs/browser-previews.md)), `hook-protocol`
   (Phase 2 hook message validation) + `hook-adapters/` (per-agent hook
-  auto-injection at spawn — Claude Code, OpenCode, and Codex today (agy in a
-  follow-up PR); Codex's is a managed merge into the user's real
-  `~/.codex/hooks.json`, not ephemeral, since Codex's own hook-trust model
-  and `CODEX_HOME`'s all-or-nothing scope rule out an ephemeral injection —
-  see [`docs/agent-hooks.md`](docs/agent-hooks.md)).
+  auto-injection at spawn — Claude Code, OpenCode, Codex, and agy; Codex's
+  and agy's are both managed merges into the user's real `~/.codex/
+hooks.json` / `~/.gemini/config/hooks.json`, not ephemeral like Claude
+  Code/OpenCode — Codex's own hook-trust model and `CODEX_HOME`'s
+  all-or-nothing scope rule out an ephemeral injection there; agy has no
+  documented env var to relocate its config at all — see
+  [`docs/agent-hooks.md`](docs/agent-hooks.md)).
 - `src/hooks/` — plain-JavaScript (not TypeScript) files loaded directly by
   an agent's own hook runner or plugin loader, not imported by the server
   process: `forwarder.mjs` bridges a shell-command-hook agent's stdin JSON

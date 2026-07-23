@@ -124,15 +124,31 @@ export function mapCodexEvent(kind, payload) {
   }
 }
 
+/** Maps one agy (Antigravity CLI) hook event to a hook-protocol message.
+ * Only `Stop` is wired up (issue #253) — `PostToolUse` is deliberately
+ * omitted, unlike every other agent's dialect: agy's own hook
+ * documentation doesn't show a tool-name/args field anywhere in its
+ * PostToolUse payload example, so there's no verified field to extract a
+ * file path from (see agy.ts's own header comment). */
+export function mapAgyEvent(kind) {
+  switch (kind) {
+    case "Stop":
+      return { kind: "progress", phase: "done" };
+    default:
+      return null;
+  }
+}
+
 /** Top-level dialect dispatch, keyed by the `<agent>` argv the adapter's
- * generated hook command passes (see claude-code.ts's `hookEntry`). agy
- * (follow-up PR) adds its own `case` here, reusing this same shim. */
+ * generated hook command passes (see claude-code.ts's `hookEntry`). */
 export function buildForwarderMessage(agent, kind, payload) {
   switch (agent) {
     case "claude-code":
       return mapClaudeCodeEvent(kind, payload ?? {});
     case "codex":
       return mapCodexEvent(kind, payload ?? {});
+    case "agy":
+      return mapAgyEvent(kind);
     default:
       return null;
   }
