@@ -105,15 +105,21 @@ function isValidDevServerUrl(value: string): boolean {
 }
 
 /**
- * Resolve a local project's cwd to a safe absolute path for filesystem
- * operations (mkdir on create/edit). Returns undefined for remote hosts —
- * the raw cwd is forwarded raw for agent-side resolution. Mirrors the
- * resolveWithinRoots pattern from routes/internal.ts that CodeQL's
- * js/path-injection query recognises as a validation boundary.
+ * Resolve a local project's cwd to a safe, constrained absolute path for
+ * filesystem operations (mkdir on create/edit). Returns undefined for
+ * remote hosts (forwarded raw for agent-side resolution) or when the
+ * resolved path falls outside the configured project roots. Mirrors the
+ * resolveWithinRoots validation-boundary pattern in routes/internal.ts
+ * that CodeQL's js/path-injection query recognises as a safe constraint.
  */
-function ensureLocalCwd(cwd: string, hostId: string): string | undefined {
+function ensureLocalCwd(cwd: string, hostId: string, app: FastifyInstance): string | undefined {
   if (hostId !== LOCAL_HOST_ID) return;
-  return path.resolve(expandHome(cwd));
+  const resolved = path.resolve(expandHome(cwd));
+  const roots = resolveProjectRoots(app);
+  if (roots.length > 0 && !roots.some((r) => resolved === r || resolved.startsWith(r + "/"))) {
+    return;
+  }
+  return resolved;
 }
 
 /**
@@ -767,7 +773,7 @@ export async function projectsRoute(app: FastifyInstance) {
       // home dir, not this process's — see host-registry.ts/issue #26's
       // landmine #3 — so it's stored/forwarded raw instead.
       const resolvedCwd = hostId === LOCAL_HOST_ID ? path.resolve(expandHome(cwd)) : cwd;
-      const safeCwd = ensureLocalCwd(cwd, hostId);
+      const safeCwd = ensureLocalCwd(cwd, hostId, app);
       const [created] = app.db
         .insert(projects)
         .values({ name, cwd: resolvedCwd, hostId })
@@ -823,7 +829,7 @@ export async function projectsRoute(app: FastifyInstance) {
         .all();
       if (updated.length === 0) return reply.notFound();
       if (cwd !== undefined) {
-        const safeCwd = ensureLocalCwd(cwd, existing.hostId);
+        const safeCwd = ensureLocalCwd(cwd, existing.hostId, app);
         if (safeCwd) {
           try {
             await fs.promises.mkdir(safeCwd, { recursive: true });
