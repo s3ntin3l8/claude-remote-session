@@ -4,7 +4,8 @@ import { ConfirmButton } from "./ConfirmButton.js";
 import { CreateProjectModal } from "./CreateProjectModal.js";
 import { KebabMenu } from "./KebabMenu.js";
 import { api, LOCAL_HOST_ID } from "./api.js";
-import type { DiscoveredProject, Host, NotificationEvent, Project, Session } from "./api.js";
+import type { DiscoveredProject, Host, Project, Session } from "./api.js";
+import { describeLatestEvent } from "./eventDescriptions.js";
 import { MullionMark } from "./assets/MullionMark.js";
 import { Dropdown } from "./settings/primitives.js";
 import { resolveAgentLogo, commandToBinary } from "./cliLogos.js";
@@ -303,77 +304,10 @@ function ProjectSection({
 // priority over working/idle since it's the highest-value signal for an
 // unwatched dashboard.
 
-// Single-event half of describeLatestEvent below — pulled apart so the
-// "walk backward until one describes" fallback there can call this per
-// candidate event without duplicating the switch. Mirrors pty-manager.ts's
-// emitEvent() call sites 1:1 (payload shapes there are the source of
-// truth); update this alongside any new kind/payload field. Returns null
-// when this specific event's kind/shape isn't one this has been taught
-// about yet.
-function describeEvent(event: NotificationEvent): { text: string; attention: boolean } | null {
-  switch (event.kind) {
-    case "attention": {
-      if (event.payload.attention !== true) {
-        // The state machine's own "clear" emit (attention-detect.ts) — no
-        // longer needs attention, but still worth surfacing as the latest
-        // event rather than reverting to "nothing to show".
-        return { text: "No longer needs attention", attention: false };
-      }
-      switch (event.payload.signal) {
-        case "bell":
-          return { text: "Bell", attention: true };
-        case "titleIdle":
-          return { text: "Finished — needs input", attention: true };
-        case "altScreenExit":
-          return { text: "Exited full-screen — needs input", attention: true };
-        case "silence":
-          return { text: "Gone quiet — needs input", attention: true };
-        case "notification":
-          return { text: "Sent a notification", attention: true };
-        default:
-          // A future signal kind this hasn't been taught yet.
-          return { text: "Needs input", attention: true };
-      }
-    }
-    case "status_change": {
-      if (event.payload.reason === "exited") return { text: "Exited", attention: false };
-      if (event.payload.screen === "alt") {
-        return { text: "Entered full-screen mode", attention: false };
-      }
-      if (event.payload.screen === "primary") {
-        return { text: "Exited full-screen mode", attention: false };
-      }
-      return null;
-    }
-    case "title_change":
-      return typeof event.payload.title === "string"
-        ? { text: event.payload.title, attention: false }
-        : null;
-    default:
-      return null;
-  }
-}
-
-// Issue #167's per-session status line — turns the most recent describable
-// NotificationEvent for a session into a short, human-readable string plus
-// whether it should get the "attention" color treatment. Walks backward
-// from the newest event rather than only looking at the very last one: a
-// top event whose kind/shape describeEvent doesn't recognize (a future
-// payload change, or a kind this hasn't been taught about) shouldn't blank
-// the line when an earlier, still-relevant event (e.g. the last title
-// change) can still describe it — last-known-good is more useful than
-// nothing. Returns null only when NO buffered event describes (including
-// the empty/undefined case), so SessionRow can render no line at all.
-function describeLatestEvent(
-  events: NotificationEvent[] | undefined,
-): { text: string; attention: boolean } | null {
-  if (!events) return null;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const described = describeEvent(events[i]);
-    if (described) return described;
-  }
-  return null;
-}
+// describeEvent/describeLatestEvent (the kind/payload interpretation this
+// row's status line uses) moved to eventDescriptions.ts for #169, which
+// needed the exact same rules for its event-feed panel — see that module's
+// own doc comment.
 
 export function SessionRow({
   session,

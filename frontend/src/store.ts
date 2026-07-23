@@ -16,7 +16,6 @@ import type {
 } from "./api.js";
 import type { ReorderUpdate } from "./reorder.js";
 import { deepMerge, mergePartialPatch } from "./settingsMerge.js";
-import { isUnreadAttention, pruneAckedAttention } from "./attention.js";
 import { connectEventsStream, type EventsClientHandle } from "./eventsClient.js";
 
 // Which workspace was last active survives a reload via localStorage (not
@@ -72,15 +71,6 @@ function readStoredSidebarWidth(): number {
   if (isNaN(parsed)) return SIDEBAR_MIN_WIDTH;
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, parsed));
 }
-// Per-browser "read" state for the notification bell (NotificationBell.tsx) —
-// there is no backend acknowledge/mark-read concept (attention is sticky
-// in-memory PtyManager state, see src/services/pty-manager.ts), so this is
-// purely a local UI overlay: sessionId -> the `attentionAt` value that was
-// acknowledged. Keyed on the timestamp rather than a plain acknowledged-ids
-// Set so a session that rings again *after* being acknowledged (a fresh,
-// larger `attentionAt` from the backend) naturally re-surfaces as unread
-// without any explicit "un-acknowledge" step.
-const ACKED_ATTENTION_KEY = "crs.acknowledgedAttention";
 // A thin first-paint mirror of the *resolved* theme only — settings.theme
 // itself (dark/light/system) is server-persisted (see hydrateSettings
 // below), but waiting on that fetch before the very first render would
@@ -94,30 +84,6 @@ function readStoredActiveWorkspaceId(): number | null {
   const parsed = raw ? Number(raw) : NaN;
   return Number.isInteger(parsed) ? parsed : null;
 }
-
-function readStoredAckedAttention(): Record<number, number> {
-  try {
-    const raw = localStorage.getItem(ACKED_ATTENTION_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const result: Record<number, number> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      const id = Number(key);
-      if (Number.isInteger(id) && typeof value === "number") result[id] = value;
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
-
-// Re-exported for existing consumers that import it alongside the store
-// (NotificationBell.tsx) — the actual definitions live in attention.ts so
-// they stay importable in the frontend's node-environment vitest tests
-// without pulling in this module's localStorage-touching creation side
-// effects.
-export { isUnreadAttention };
 
 // The *resolved* theme — what's actually painted (dockview class, root
 // `.light` class, xterm palette). Distinct from `AppSettings["theme"]`
@@ -172,6 +138,17 @@ export interface SplitRequest {
   direction: "right" | "below";
 }
 
+// The composite key `dismissedEventKeys` (below) and PaneTab.tsx's own
+// dismissed-filter are keyed on — `seq` alone isn't unique across sessions
+// (it's a per-session monotonic counter, see api.ts's NotificationEvent
+// doc comment), so any per-event state keyed just by seq would collide
+// across sessions. Exported so PaneTab.tsx's badge filter and
+// NotificationBell.tsx's feed use the exact same key shape as
+// dismissEvent() writes.
+export function eventKey(sessionId: number, seq: number): string {
+  return `${sessionId}:${seq}`;
+}
+
 interface DashboardState {
   projects: Project[];
   sessions: Session[];
@@ -203,11 +180,24 @@ interface DashboardState {
   // Advanced only via markEventSeen, never decremented — mirrors the
   // server's own monotonic-only `lastSeenSeq`. Not persisted (localStorage
   // or otherwise): a reload legitimately re-shows the badge for events the
-  // user technically already saw last session, same tradeoff
-  // acknowledgedAttention used to accept before this existed. A real fix
-  // needs the server to expose its cursor on connect/replay, which PR1
-  // didn't build — out of scope here.
+  // user technically already saw last session — the same tradeoff the old
+  // localStorage-backed acknowledgedAttention overlay (removed for #169;
+  // see NotificationBell.tsx's history) used to accept. A real fix needs
+  // the server to expose its cursor on connect/replay, which PR1 didn't
+  // build — out of scope here.
   lastSeenSeq: Record<number, number>;
+  // Issue #169's other half of per-event state: an explicit "dismiss" —
+  // remove from the notification panel's feed, never resurface — which is
+  // deliberately NOT the same operation as "read". `lastSeenSeq` above
+  // answers "has the user seen this" (monotonic, coexists with the tab
+  // badge); this answers "should this even still be listed" and can flag an
+  // individual event anywhere in a session's history, in any order, without
+  // touching the read cursor. Keyed by `eventKey(sessionId, seq)` (below)
+  // since `seq` alone isn't unique across sessions. In-memory only, same as
+  // `events`/`lastSeenSeq` — a reload re-shows a dismissed event, which is
+  // an acceptable degrade given the underlying event itself isn't persisted
+  // past the backend's own ring buffer + replay-on-connect window either.
+  dismissedEventKeys: Record<string, true>;
   workspaces: Workspace[];
   groups: Group[];
   // Registered hosts (issue #26) — includes the always-present "local" row.
@@ -231,8 +221,6 @@ interface DashboardState {
   notificationsEnabled: boolean;
   sidebarCollapsed: boolean;
   sidebarWidth: number;
-  // Per-browser notification-bell read state — see ACKED_ATTENTION_KEY above.
-  acknowledgedAttention: Record<number, number>;
   // Design's "whole backend down" state (States doc section 04) — flips
   // false after BACKEND_UNREACHABLE_THRESHOLD consecutive session-fetch
   // failures, true again the moment one succeeds. See
@@ -337,10 +325,6 @@ interface DashboardState {
   setNotificationsEnabled: (value: boolean) => void;
   setSidebarCollapsed: (value: boolean) => void;
   setSidebarWidth: (value: number) => void;
-  // NotificationBell.tsx's row click / "Mark all as read" — see
-  // isUnreadAttention above for the read/unread rule these maintain.
-  acknowledgeAttention: (sessionId: number) => void;
-  acknowledgeAllAttention: () => void;
   requestSplit: (referencePanelId: string, direction: "right" | "below") => void;
   clearSplitRequest: () => void;
   // Starts the ~4s session-status poll (paused while the tab is hidden) and
@@ -361,6 +345,11 @@ interface DashboardState {
   // already recorded is ignored), mirroring the server's own monotonic
   // `lastSeenSeq`.
   markEventSeen: (sessionId: number, seq: number) => void;
+  // Issue #169's "dismiss" action — flags one event as permanently removed
+  // from the notification feed (see `dismissedEventKeys` above for why this
+  // is deliberately separate from markEventSeen/lastSeenSeq). Idempotent;
+  // dismissing an already-dismissed (sessionId, seq) is a no-op re-set.
+  dismissEvent: (sessionId: number, seq: number) => void;
   // Re-resolves `theme` whenever the OS-level color-scheme preference
   // changes, but only while settings.theme === "system" — a no-op the rest
   // of the time. Returns a cleanup function; called once from App.tsx
@@ -431,6 +420,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
     gitStatuses: {},
     events: {},
     lastSeenSeq: {},
+    dismissedEventKeys: {},
     projectUrls: {},
     workspaces: [],
     groups: [],
@@ -443,7 +433,6 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
     notificationsEnabled: DEFAULT_SETTINGS.notifications.attentionAlerts,
     sidebarCollapsed: localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1",
     sidebarWidth: readStoredSidebarWidth(),
-    acknowledgedAttention: readStoredAckedAttention(),
     splitRequest: null,
     backendReachable: true,
     currentVersion: null,
@@ -745,29 +734,6 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
       set({ sidebarWidth: value });
     },
 
-    acknowledgeAttention: (sessionId) => {
-      const sessions = get().sessions;
-      const session = sessions.find((s) => s.id === sessionId);
-      const next = pruneAckedAttention(
-        { ...get().acknowledgedAttention, [sessionId]: session?.attentionAt ?? Date.now() },
-        sessions,
-      );
-      localStorage.setItem(ACKED_ATTENTION_KEY, JSON.stringify(next));
-      set({ acknowledgedAttention: next });
-    },
-
-    acknowledgeAllAttention: () => {
-      const sessions = get().sessions;
-      const merged = { ...get().acknowledgedAttention };
-      for (const session of sessions) {
-        if (isUnreadAttention(session, merged))
-          merged[session.id] = session.attentionAt ?? Date.now();
-      }
-      const next = pruneAckedAttention(merged, sessions);
-      localStorage.setItem(ACKED_ATTENTION_KEY, JSON.stringify(next));
-      set({ acknowledgedAttention: next });
-    },
-
     requestSplit: (referencePanelId, direction) => {
       set({ splitRequest: { referencePanelId, direction } });
     },
@@ -827,6 +793,12 @@ export const useDashboardStore = create<DashboardState>((set, get) => {
         return { lastSeenSeq: { ...state.lastSeenSeq, [sessionId]: seq } };
       });
       eventsClientHandle?.sendSeen(sessionId, seq);
+    },
+
+    dismissEvent: (sessionId, seq) => {
+      set((state) => ({
+        dismissedEventKeys: { ...state.dismissedEventKeys, [eventKey(sessionId, seq)]: true },
+      }));
     },
 
     startThemeWatch: () => {

@@ -1608,11 +1608,15 @@ body {
 /* NotificationBell's dropdown — shares .pane-tab-overflow-menu's shell
    (portal positioning, border, shadow, pop-in animation) but is wider and
    its rows are multi-line, so they get their own classes rather than
-   reusing .pane-tab-overflow-item. */
+   reusing .pane-tab-overflow-item. Issue #169 turned this from a flat list
+   of at-most-one-row-per-session into a scrollable, grouped event feed — the
+   panel itself is now a fixed-height flex column (header pinned, only the
+   feed body scrolls/virtualizes) rather than the whole panel scrolling. */
 .notif-panel {
-  width: 300px;
-  max-height: 360px;
-  overflow-y: auto;
+  width: 320px;
+  max-height: 380px;
+  display: flex;
+  flex-direction: column;
 }
 .notif-panel-header {
   display: flex;
@@ -1620,6 +1624,7 @@ body {
   justify-content: space-between;
   gap: 8px;
   padding: 6px 7px 8px;
+  flex-shrink: 0;
 }
 .notif-panel-title {
   font-size: 11px;
@@ -1651,13 +1656,39 @@ body {
   color: var(--dim);
   text-align: center;
 }
-.notif-row {
+/* The virtualizer's own scroll container — `min-height: 0` is required for
+   a flex child to actually shrink and scroll instead of stretching
+   `.notif-panel` past its own max-height. */
+.notif-feed-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 0 5px 5px;
+}
+.notif-group-header {
   display: flex;
   flex-direction: column;
+  gap: 1px;
+  padding: 8px 6px 3px;
+}
+.notif-group-header-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--fg);
+}
+.notif-group-header-subtitle {
+  font-size: 10px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notif-event-row {
+  display: flex;
   align-items: flex-start;
-  gap: 2px;
+  gap: 8px;
   width: 100%;
-  padding: 8px 9px;
+  padding: 7px 6px;
   border: none;
   background: transparent;
   color: var(--fg);
@@ -1666,25 +1697,78 @@ body {
   font-family: inherit;
   text-align: left;
 }
-.notif-row:hover {
+.notif-event-row:hover {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
-.notif-row-title {
+/* An already-read event stays in the feed (history, not just "unread
+   inbox") but recedes visually — dimmer text, no unread accent — so the
+   still-unread rows keep drawing the eye. */
+.notif-event-row.read .notif-event-text {
+  color: var(--muted);
+  font-weight: 400;
+}
+.notif-event-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  margin-top: 1px;
+}
+.notif-event-icon.attention {
+  color: var(--ring);
+  background: color-mix(in srgb, var(--ring) 16%, transparent);
+}
+.notif-event-icon.exited {
+  color: var(--g);
+  background: color-mix(in srgb, var(--g) 16%, transparent);
+}
+.notif-event-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.notif-event-text {
   font-size: 12.5px;
   font-weight: 600;
-}
-.notif-row-subtitle {
-  font-size: 11px;
-  color: var(--muted);
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
-.notif-row-time {
+.notif-event-time {
   font-size: 10.5px;
   color: var(--dim);
   font-family: "Geist Mono", monospace;
+}
+.notif-event-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.notif-event-action-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--dim);
+  border-radius: 5px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.notif-event-action-btn:hover {
+  background: color-mix(in srgb, var(--fg) 14%, transparent);
+  color: var(--fg);
 }
 
 /* Shared KebabMenu trigger (group/workspace/project rows) — same box as
