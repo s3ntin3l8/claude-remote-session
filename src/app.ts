@@ -16,6 +16,7 @@ import { healthRoute } from "./routes/health.js";
 import { authRoute } from "./routes/auth.js";
 import { usersRoute } from "./routes/users.js";
 import { terminalRoute } from "./routes/terminal.js";
+import { eventsRoute } from "./routes/events.js";
 import { projectsRoute } from "./routes/projects.js";
 import { sessionsRoute } from "./routes/sessions.js";
 import { workspacesRoute } from "./routes/workspaces.js";
@@ -156,6 +157,7 @@ export async function buildApp() {
   await app.register(previewsRoute);
   await app.register(projectUrlsRoute);
   await app.register(terminalRoute);
+  await app.register(eventsRoute);
 
   return app;
 }
