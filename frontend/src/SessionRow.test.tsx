@@ -689,3 +689,191 @@ describe("SessionRow row 3 — git details (issue #202)", () => {
     expect(container.querySelector(".session-git-diffstat")?.textContent).toContain("3 files");
   });
 });
+
+describe("SessionRow row 4 — file changes (issue #177)", () => {
+  it("renders no strip when the session has no file_change events", () => {
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    expect(container.querySelector(".session-file-changes-line")).toBeNull();
+  });
+
+  it("renders no strip for a session with only non-file_change events", () => {
+    events = {
+      1: [{ seq: 1, sessionId: 1, kind: "title_change", ts: Date.now(), payload: { title: "x" } }],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    expect(container.querySelector(".session-file-changes-line")).toBeNull();
+  });
+
+  it("renders one chip per distinct path, most-recently-changed first", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/a.ts", action: "modify" },
+        },
+        {
+          seq: 2,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/b.ts", action: "create" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const chips = container.querySelectorAll(".session-file-change-chip");
+    expect(chips).toHaveLength(2);
+    // seq 2 (b.ts) is more recent than seq 1 (a.ts) -> shown first.
+    expect(chips[0].querySelector(".session-file-change-name")?.textContent).toBe("b.ts");
+    expect(chips[0].querySelector(".session-file-change-letter")?.textContent).toBe("A");
+    expect(chips[0].querySelector(".github-panel-ci-dot")?.classList.contains("good")).toBe(true);
+    expect(chips[1].querySelector(".session-file-change-name")?.textContent).toBe("a.ts");
+    expect(chips[1].querySelector(".session-file-change-letter")?.textContent).toBe("M");
+    expect(chips[1].querySelector(".github-panel-ci-dot")?.classList.contains("pending")).toBe(
+      true,
+    );
+  });
+
+  it("collapses repeated events for the same path into one chip with the latest action", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/a.ts", action: "create" },
+        },
+        {
+          seq: 2,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/a.ts", action: "modify" },
+        },
+        {
+          seq: 3,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/a.ts", action: "modify" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const chips = container.querySelectorAll(".session-file-change-chip");
+    expect(chips).toHaveLength(1);
+    expect(chips[0].querySelector(".session-file-change-letter")?.textContent).toBe("M");
+  });
+
+  it("shows the D badge for a deleted file", () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/gone.ts", action: "delete" },
+        },
+      ],
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const chip = container.querySelector(".session-file-change-chip");
+    expect(chip?.querySelector(".session-file-change-letter")?.textContent).toBe("D");
+    expect(chip?.querySelector(".github-panel-ci-dot")?.classList.contains("bad")).toBe(true);
+  });
+
+  it("caps the number of chips shown at 5, keeping the most recent", () => {
+    events = {
+      1: Array.from({ length: 7 }, (_, i) => ({
+        seq: i + 1,
+        sessionId: 1,
+        kind: "file_change" as const,
+        ts: Date.now(),
+        payload: { path: `src/file-${i}.ts`, action: "modify" as const },
+      })),
+    };
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+    const chips = container.querySelectorAll(".session-file-change-chip");
+    expect(chips).toHaveLength(5);
+    // Most recent 5 of 7 -> file-2 through file-6.
+    expect(chips[0].querySelector(".session-file-change-name")?.textContent).toBe("file-6.ts");
+    expect(chips[4].querySelector(".session-file-change-name")?.textContent).toBe("file-2.ts");
+  });
+
+  it("expands a minimal path + action + count detail on click, and collapses on a second click", async () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/a.ts", action: "modify" },
+        },
+        {
+          seq: 2,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/a.ts", action: "modify" },
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={vi.fn()} onEnd={vi.fn()} />,
+    );
+
+    expect(container.querySelector(".session-file-change-detail")).toBeNull();
+
+    await user.click(container.querySelector(".session-file-change-chip")!);
+    const detail = container.querySelector(".session-file-change-detail");
+    expect(detail?.querySelector(".session-file-change-detail-path")?.textContent).toBe("src/a.ts");
+    expect(detail?.querySelector(".session-file-change-detail-meta")?.textContent).toBe(
+      "M · 2 changes",
+    );
+
+    await user.click(container.querySelector(".session-file-change-chip")!);
+    expect(container.querySelector(".session-file-change-detail")).toBeNull();
+  });
+
+  it("clicking a chip does not fire onOpen", async () => {
+    events = {
+      1: [
+        {
+          seq: 1,
+          sessionId: 1,
+          kind: "file_change",
+          ts: Date.now(),
+          payload: { path: "src/a.ts", action: "modify" },
+        },
+      ],
+    };
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    const { container } = render(
+      <SessionRow session={makeSession({})} project={PROJECT} onOpen={onOpen} onEnd={vi.fn()} />,
+    );
+
+    await user.click(container.querySelector(".session-file-change-chip")!);
+
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+});
