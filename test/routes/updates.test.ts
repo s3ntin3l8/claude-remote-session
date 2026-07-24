@@ -65,6 +65,7 @@ describe("updates route", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     delete process.env.MULLION_HOME;
+    delete process.env.MULLION_SERVICE_UNIT;
     fs.rmSync(mullionHome, { recursive: true, force: true });
   });
 
@@ -378,7 +379,14 @@ describe("updates route", () => {
       expect(spawnMock).toHaveBeenCalledTimes(1);
       const [command, argv, opts] = spawnMock.mock.calls[0];
       expect(command).toBe("systemd-run");
-      expect(argv).toEqual([
+      // No MULLION_SERVICE_UNIT override is set, so the last arg is whatever
+      // resolveServiceUnit's cgroup autodetection finds on *this* host — not
+      // necessarily the "mullion.service" default. A CI/dev host running
+      // this test suite from inside its own systemd .service unit (or any
+      // other real .service cgroup) would make an exact-value assertion here
+      // flaky, so only the shape is checked; the override path below is
+      // where the exact resolved value is verified.
+      expect(argv.slice(0, -1)).toEqual([
         "--user",
         "--scope",
         "--collect",
@@ -391,11 +399,8 @@ describe("updates route", () => {
         VALID_CHECKSUM_URL,
         mullionHome,
         process.execPath,
-        // No MULLION_SERVICE_UNIT override and no real /proc/self/cgroup
-        // match under test — falls through to the default (see
-        // src/services/systemd-unit.ts's resolveServiceUnit).
-        "mullion.service",
       ]);
+      expect(argv.at(-1)).toMatch(/\.service$/);
       expect(opts).toMatchObject({ cwd: mullionHome, stdio: "ignore" });
 
       await app.close();
@@ -420,7 +425,6 @@ describe("updates route", () => {
       const [, argv] = spawnMock.mock.calls[0];
       expect(argv.at(-1)).toBe("custom-mullion.service");
 
-      delete process.env.MULLION_SERVICE_UNIT;
       await app.close();
     });
   });
