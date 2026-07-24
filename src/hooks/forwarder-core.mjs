@@ -55,6 +55,32 @@ export function mapClaudeCodePostToolUse(payload) {
   return { kind: "file_change", path: filePath, action: "modify" };
 }
 
+// The longest a review-gate prompt summary is allowed to be before
+// truncating (issue #178) — `tool_input.command` for a Bash call can be an
+// arbitrarily long script; the prompt only needs to be enough for a human to
+// recognize what they're approving, not a full transcript (the sidebar/event
+// feed already show the actual command elsewhere once the tool runs).
+const GATE_PROMPT_MAX_CHARS = 200;
+
+function summarizeToolCall(payload) {
+  const toolName = typeof payload?.tool_name === "string" ? payload.tool_name : "a tool";
+  const input = payload?.tool_input;
+  const detail =
+    typeof input?.command === "string"
+      ? input.command
+      : typeof input?.file_path === "string"
+        ? input.file_path
+        : null;
+  if (detail === null || detail.length === 0) return toolName;
+  const truncated =
+    detail.length > GATE_PROMPT_MAX_CHARS ? `${detail.slice(0, GATE_PROMPT_MAX_CHARS)}…` : detail;
+  return `${toolName}: ${truncated}`;
+}
+
+export function mapClaudeCodePreToolUse(payload) {
+  return { kind: "review_gate", state: "waiting", prompt: summarizeToolCall(payload) };
+}
+
 /** Maps one Claude Code hook event to a hook-protocol message, or `null` if
  * this event/kind combination doesn't produce one. */
 export function mapClaudeCodeEvent(kind, payload) {
@@ -65,6 +91,8 @@ export function mapClaudeCodeEvent(kind, payload) {
       return mapClaudeCodeStop();
     case "PostToolUse":
       return mapClaudeCodePostToolUse(payload);
+    case "PreToolUse":
+      return mapClaudeCodePreToolUse(payload);
     default:
       return null;
   }
@@ -151,6 +179,53 @@ export function buildForwarderMessage(agent, kind, payload) {
       return mapAgyEvent(kind);
     default:
       return null;
+  }
+}
+
+// Issue #178 — the decision-formatting half of the review gate: once
+// runGate() (forwarder.mjs) has a real `{decision, reason}` from Mullion
+// (or its own fail-closed default), this turns it into whatever JSON shape
+// the target agent's PreToolUse-equivalent hook expects on stdout. Only
+// Claude Code has a real gate dialect wired up (issue #174/#178) — Codex and
+// agy deliberately do NOT register a PreToolUse hook at all (see codex.ts's
+// and agy.ts's own header comments for why: Codex's hook-trust gate and
+// agy's undocumented/likely-fail-open decision contract are both real
+// hazards, not yet safe to wire up as a real safety control — see the
+// tracking issue referenced there), so `buildForwarderMessage` never
+// produces a `review_gate` message for them and this function's default
+// branch is unreachable in practice today; it's still fail-closed rather
+// than silent, in case that ever changes without this file being updated.
+export function formatClaudeCodeGateDecision(decision, reason) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: decision === "approved" ? "allow" : "deny",
+      permissionDecisionReason:
+        reason ?? (decision === "approved" ? "Approved via Mullion" : "Denied via Mullion"),
+    },
+  };
+}
+
+export function formatGateDecision(agent, decision, reason) {
+  switch (agent) {
+    case "claude-code":
+      return formatClaudeCodeGateDecision(decision, reason);
+    default:
+      // No other agent has a real gate dialect yet — see this function's
+      // own doc comment. Genuinely unreachable today, but if it ever is
+      // reached, print to stderr (never stdout — that's reserved for the
+      // decision JSON itself) so it's visible rather than silently wrong.
+      // Uses the same "denied"/"approved" vocabulary as every other
+      // Mullion-internal decision value in this codebase (hook-protocol.ts,
+      // hooks.ts, the REST endpoint) — deliberately NOT Claude Code's own
+      // "deny"/"allow" field values (formatClaudeCodeGateDecision above),
+      // since a future agent's own gate dialect almost certainly expects a
+      // different shape entirely and shouldn't be steered toward Claude
+      // Code's by this fallback's accidental resemblance to it.
+      console.error(
+        `forwarder: no gate dialect registered for agent "${agent}" — this should be unreachable`,
+      );
+      return { decision: decision === "approved" ? "approved" : "denied" };
   }
 }
 

@@ -18,17 +18,34 @@
 // compiled twin kept in sync by hand for dev, which is exactly the
 // dev/prod path mismatch this design avoids.
 //
-// PR4 registers ONLY non-blocking hooks (Notification/Stop/PostToolUse), so
-// this shim is pure fire-and-forget: connect, write, exit — no reply is
-// ever awaited. The blocking review-gate path (PreToolUse, waiting on a real
-// human decision) is deliberately deferred to PR9 (issue #178), which is
-// where this file gains a bounded blocking-read-then-stdout-decision branch
-// alongside the endpoint that actually answers it — see PR4's description
-// for why shipping a blocking hook now, with nothing to resolve it, would
-// hang every real tool call instead.
+// Most hooks (Notification/Stop/PostToolUse) are pure fire-and-forget:
+// connect, write, exit — no reply is ever awaited (see forward() below).
+// The blocking review-gate path (PreToolUse, issue #178) is the one
+// exception: when the mapped message is a `review_gate` in state "waiting",
+// this instead keeps the connection open and blocks for a single reply line
+// (runGate() below) — written back by hooks.ts once POST
+// /api/sessions/:id/review-gate delivers a real decision, or by hooks.ts's
+// own server-side timeout if nobody ever does — then prints the target
+// agent's own decision JSON to stdout (formatGateDecision, see
+// forwarder-core.mjs) instead of the unconditional `{}` main() otherwise
+// prints. Every path through the gate branch — a real reply, a timeout, a
+// dropped connection, or an unexpected internal error — resolves to SOME
+// decision object, defaulting to "denied": a gate that silently fails open
+// (printing `{}`, which Claude Code's PreToolUse contract doesn't recognize
+// as any decision at all) would be a safety control that lies, which is a
+// categorically worse failure mode than the fire-and-forget hooks above
+// simply losing an event.
 
 import net from "node:net";
-import { buildForwarderMessage, parseHookStdin } from "./forwarder-core.mjs";
+import { buildForwarderMessage, formatGateDecision, parseHookStdin } from "./forwarder-core.mjs";
+
+// Bounded below claude-code.ts's own PreToolUse hook `timeout`
+// (GATE_HOOK_TIMEOUT_SECONDS, 300s) so THIS process controls the fail-closed
+// decision and prints valid JSON before the agent's own hook-level timeout
+// fires and does something less predictable — mirrors hooks.ts's own
+// GATE_TIMEOUT_MS (290s) for the same reason, on the other end of the same
+// connection.
+const GATE_TIMEOUT_MS = 280_000;
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -45,19 +62,38 @@ function readStdin() {
 }
 
 async function main() {
-  // Some agents (agy — issue #253) run hooks SYNCHRONOUSLY, blocking their
-  // own agent loop on this process's exit, and expect a JSON decision
-  // object on stdout even for a purely observational hook (an empty `{}`
-  // means "no decision" — never blocks/continues anything). Printed
-  // unconditionally, on every exit path: harmless for Claude Code/Codex,
-  // whose own hook contracts don't require (or forbid) any stdout output.
+  // forward() returns null for the ordinary fire-and-forget path, or a
+  // `{decision, reason}` object once a gate has been resolved (see
+  // forward()'s own comment) — main() is the one place that decides what to
+  // print based on which of those happened, so a gate decision and the
+  // unconditional `{}` below can never both be written to stdout.
+  let gateDecision = null;
   try {
-    await forward();
+    gateDecision = await forward();
   } finally {
-    console.log("{}");
+    if (gateDecision !== null) {
+      console.log(
+        JSON.stringify(
+          formatGateDecision(process.argv[2], gateDecision.decision, gateDecision.reason),
+        ),
+      );
+    } else {
+      // Some agents (agy — issue #253) run hooks SYNCHRONOUSLY, blocking
+      // their own agent loop on this process's exit, and expect a JSON
+      // decision object on stdout even for a purely observational hook (an
+      // empty `{}` means "no decision" — never blocks/continues anything).
+      // Printed unconditionally, on every non-gate exit path: harmless for
+      // Claude Code/Codex, whose own hook contracts don't require (or
+      // forbid) any stdout output.
+      console.log("{}");
+    }
   }
 }
 
+/** Returns `null` for the ordinary fire-and-forget path (main() prints
+ * `{}`), or a `{decision, reason}` object once a gate has resolved (main()
+ * prints that agent's own decision JSON instead) — see main()'s comment for
+ * why exactly one of those ever reaches stdout. */
 async function forward() {
   const agent = process.argv[2];
   const kind = process.argv[3];
@@ -68,7 +104,7 @@ async function forward() {
   // Mullion session entirely) — silently do nothing. Never block or error
   // the agent's own hook execution on Mullion's behalf.
   if (!socketPath || !token || !agent || !kind) {
-    return;
+    return null;
   }
 
   const raw = await readStdin();
@@ -79,7 +115,24 @@ async function forward() {
   // or nothing at all.
   const messages = Array.isArray(result) ? result : result === null ? [] : [result];
   if (messages.length === 0) {
-    return;
+    return null;
+  }
+
+  const gateMessage = messages.find((m) => m.kind === "review_gate" && m.state === "waiting");
+  if (gateMessage) {
+    // Deliberately wrapped: a synchronous throw from inside runGate's
+    // executor (e.g. net.createConnection on a malformed socketPath) would
+    // otherwise propagate out of this function as a rejected promise,
+    // skipping straight to main()'s `finally` with gateDecision still null
+    // — which would print the generic `{}` for what was actually a gate,
+    // i.e. fail OPEN. runGate() itself already never rejects; this catch is
+    // defense in depth so "this was a gate" can never lose its fail-closed
+    // guarantee for any reason.
+    try {
+      return await runGate(socketPath, token, gateMessage);
+    } catch {
+      return { decision: "denied", reason: "forwarder error" };
+    }
   }
 
   await new Promise((resolve) => {
@@ -107,6 +160,55 @@ async function forward() {
     });
     socket.once("close", finish);
     socket.once("error", finish);
+  });
+  return null;
+}
+
+/** Sends the handshake + one `review_gate` waiting message, then blocks for
+ * a single reply line: `{decision, reason?}`, written back by hooks.ts (see
+ * that file's resolvePendingGate). Bounded by GATE_TIMEOUT_MS, and fails
+ * closed ("denied") on a timeout, a connection error, an early close, or a
+ * reply that doesn't parse as valid JSON — never rejects, always resolves to
+ * a decision object, so callers never need their own fallback. */
+function runGate(socketPath, token, gateMessage) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    const finish = (decision) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(decision);
+    };
+    const timer = setTimeout(
+      () => finish({ decision: "denied", reason: "timed out waiting for a decision" }),
+      GATE_TIMEOUT_MS,
+    );
+
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+      const line = buffer.slice(0, newlineIndex);
+      let reply;
+      try {
+        reply = JSON.parse(line);
+      } catch {
+        finish({ decision: "denied", reason: "malformed decision" });
+        return;
+      }
+      const decision = reply?.decision === "approved" ? "approved" : "denied";
+      const reason = typeof reply?.reason === "string" ? reply.reason : undefined;
+      finish({ decision, reason });
+    });
+    socket.on("error", () => finish({ decision: "denied", reason: "connection error" }));
+    socket.on("close", () => finish({ decision: "denied", reason: "connection closed" }));
+    socket.once("connect", () => {
+      socket.write(`${JSON.stringify({ token })}\n`);
+      socket.write(`${JSON.stringify(gateMessage)}\n`);
+    });
   });
 }
 

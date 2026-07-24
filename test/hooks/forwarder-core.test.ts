@@ -1,10 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildForwarderMessage,
+  formatClaudeCodeGateDecision,
+  formatGateDecision,
   mapAgyEvent,
   mapClaudeCodeEvent,
   mapClaudeCodeNotification,
   mapClaudeCodePostToolUse,
+  mapClaudeCodePreToolUse,
   mapClaudeCodeStop,
   mapCodexEvent,
   mapCodexPostToolUse,
@@ -95,8 +98,43 @@ describe("mapClaudeCodePostToolUse", () => {
   });
 });
 
+describe("mapClaudeCodePreToolUse (issue #178)", () => {
+  it("summarizes a Bash command in the prompt", () => {
+    expect(
+      mapClaudeCodePreToolUse({ tool_name: "Bash", tool_input: { command: "rm -rf /tmp/x" } }),
+    ).toEqual({ kind: "review_gate", state: "waiting", prompt: "Bash: rm -rf /tmp/x" });
+  });
+
+  it("falls back to file_path when there's no command field", () => {
+    expect(
+      mapClaudeCodePreToolUse({ tool_name: "Write", tool_input: { file_path: "/repo/a.ts" } }),
+    ).toEqual({ kind: "review_gate", state: "waiting", prompt: "Write: /repo/a.ts" });
+  });
+
+  it("falls back to just the tool name with no usable detail at all", () => {
+    expect(mapClaudeCodePreToolUse({ tool_name: "Bash", tool_input: {} })).toEqual({
+      kind: "review_gate",
+      state: "waiting",
+      prompt: "Bash",
+    });
+    expect(mapClaudeCodePreToolUse({})).toEqual({
+      kind: "review_gate",
+      state: "waiting",
+      prompt: "a tool",
+    });
+  });
+
+  it("truncates a long command rather than embedding it in full", () => {
+    const command = "x".repeat(500);
+    const result = mapClaudeCodePreToolUse({ tool_name: "Bash", tool_input: { command } });
+    expect(result.prompt.length).toBeLessThan(220);
+    expect(result.prompt.endsWith("…")).toBe(true);
+    expect(result.prompt.startsWith("Bash: xxx")).toBe(true);
+  });
+});
+
 describe("mapClaudeCodeEvent", () => {
-  it("dispatches Notification/Stop/PostToolUse to their mappers", () => {
+  it("dispatches Notification/Stop/PostToolUse/PreToolUse to their mappers", () => {
     expect(mapClaudeCodeEvent("Notification", { message: "hi" })).toEqual({
       kind: "notification",
       title: "Claude Code",
@@ -106,10 +144,17 @@ describe("mapClaudeCodeEvent", () => {
     expect(
       mapClaudeCodeEvent("PostToolUse", { tool_name: "Write", tool_input: { file_path: "x" } }),
     ).toEqual({ kind: "file_change", path: "x", action: "modify" });
+    expect(
+      mapClaudeCodeEvent("PreToolUse", { tool_name: "Bash", tool_input: { command: "ls" } }),
+    ).toEqual({
+      kind: "review_gate",
+      state: "waiting",
+      prompt: "Bash: ls",
+    });
   });
 
-  it("returns null for an unrecognized kind (e.g. a future PreToolUse before PR9)", () => {
-    expect(mapClaudeCodeEvent("PreToolUse", {})).toBeNull();
+  it("returns null for an unrecognized kind", () => {
+    expect(mapClaudeCodeEvent("SomeFutureKind", {})).toBeNull();
   });
 });
 
@@ -226,5 +271,57 @@ describe("buildForwarderMessage", () => {
       kind: "progress",
       phase: "done",
     });
+  });
+});
+
+describe("formatClaudeCodeGateDecision (issue #178)", () => {
+  it("maps 'approved' to permissionDecision 'allow'", () => {
+    expect(formatClaudeCodeGateDecision("approved")).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        permissionDecisionReason: "Approved via Mullion",
+      },
+    });
+  });
+
+  it("maps 'denied' to permissionDecision 'deny'", () => {
+    expect(formatClaudeCodeGateDecision("denied")).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: "Denied via Mullion",
+      },
+    });
+  });
+
+  it("prefers a given reason over the default text", () => {
+    expect(formatClaudeCodeGateDecision("denied", "looks unsafe")).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: "looks unsafe",
+      },
+    });
+  });
+});
+
+describe("formatGateDecision (issue #178)", () => {
+  it("dispatches to the claude-code dialect", () => {
+    expect(formatGateDecision("claude-code", "approved")).toEqual(
+      formatClaudeCodeGateDecision("approved"),
+    );
+  });
+
+  it("falls back to a generic shape (Mullion's own approved/denied vocabulary, not Claude Code's) for any agent without a real gate dialect yet", () => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(formatGateDecision("codex", "approved")).toEqual({ decision: "approved" });
+      expect(formatGateDecision("agy", "denied")).toEqual({ decision: "denied" });
+      expect(formatGateDecision("some-future-agent", "denied")).toEqual({ decision: "denied" });
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

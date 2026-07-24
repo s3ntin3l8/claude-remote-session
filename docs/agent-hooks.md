@@ -51,7 +51,7 @@ against a `kind`-discriminated shape:
 | `notification` | `title: string`, `body: string`                                | Surfaces in the notification bell/desktop-notify, same as a BEL. |
 | `progress`     | `phase: "thinking" \| "generating" \| "done"`                  | Drives the sidebar status line.                                  |
 | `file_change`  | `path: string`, `action: "modify" \| "create" \| "delete"`     | A file the agent touched (issue #177's sidebar strip).           |
-| `review_gate`  | `state: "waiting" \| "approved" \| "denied"`, `prompt: string` | A pending decision (issue #178's review gate — not built yet).   |
+| `review_gate`  | `state: "waiting" \| "approved" \| "denied"`, `prompt: string` | A pending decision (issue #178's review gate — see below).       |
 | `fork`/`join`  | `childPid: number`                                             | Validated and stored, not yet surfaced in any UI (Phase 5).      |
 
 A `kind` this list hasn't been taught yet is accepted and stored verbatim
@@ -77,18 +77,22 @@ left untouched, since rewriting one piece of a chained command could attach
 a flag to the wrong part of it), Mullion:
 
 1. Writes an ephemeral `<sessionId>.hooks.json` under the sessions directory
-   (never `~/.claude` or the repo) registering `Notification`, `Stop`, and
-   `PostToolUse` hooks — each one invokes a small shared forwarder script
-   (`src/hooks/forwarder.mjs`) that maps the hook's own JSON to the wire
-   protocol above and writes it to `$MULLION_HOOK_SOCKET`.
+   (never `~/.claude` or the repo) registering `Notification`, `Stop`,
+   `PostToolUse`, and `PreToolUse` hooks — each one invokes a small shared
+   forwarder script (`src/hooks/forwarder.mjs`) that maps the hook's own
+   JSON to the wire protocol above and writes it to `$MULLION_HOOK_SOCKET`.
 2. Appends `--settings <that file>` to the command actually spawned.
 
-Only these three hooks are registered. `PreToolUse` — which would gate a
-tool call on a human decision — is deliberately **not** wired up yet: there
-is no endpoint to ever answer it (that's issue #178's review gate), and a
-blocking hook with nothing to resolve it would hang every real tool call
-instead of just not being there. `Notification`/`Stop`/`PostToolUse` are all
-fire-and-forget, so this is safe to ship ahead of the gate itself.
+`Notification`/`Stop`/`PostToolUse` are fire-and-forget. `PreToolUse` is the
+one **blocking** hook — the review gate (see below) — and is deliberately
+gated to `matcher: "Bash"` only, not every tool call: this hook system is on
+by default, so gating every single tool call would by default pause every
+Claude Code session's normal edit-heavy workflow on every Write/Edit/Read,
+which would defeat the point of an autonomous-agent dashboard. Bash's blast
+radius (arbitrary shell execution) is the one case judged worth a
+human-in-the-loop pause by default; file edits stay fire-and-forget via the
+existing `PostToolUse` hook. Making the gated tool set configurable is a
+natural follow-up, not built here.
 
 **OpenCode** has no shell-command hooks at all — only a JS/TS plugin API,
 auto-discovered from a `plugins/` directory it scans (never referenced by
@@ -113,8 +117,11 @@ way). The plugin forwards only `session.idle` (→ `progress: done`) and
 hook is `permission.ask` (mutating an `output.status` of `ask`/`deny`/
 `allow`), confirmed against the installed `@opencode-ai/plugin` package's
 own types — **not** `tool.execute.before` throwing, as originally assumed
-during planning. Like Claude Code's `PreToolUse`, it's deliberately not
-wired up yet: no endpoint exists to answer it before issue #178.
+during planning. Unlike Claude Code's `PreToolUse`, it's still deliberately
+not wired up: the review-gate endpoint now exists (issue #178), but
+OpenCode's own `permission.ask` gating dialect was never implemented or
+verified against a live plugin execution — tracked in issue #264 alongside
+Codex's and agy's own deferred gate dialects.
 
 **Codex** reuses the same shared forwarder as Claude Code (`src/hooks/
 forwarder.mjs`, `codex` as its agent argv), registering `Stop` (→
@@ -193,6 +200,53 @@ until each hook command exits, and its `Stop` contract expects a JSON
 decision object on stdout, the shared forwarder now always prints `{}` to
 stdout right before exiting (harmless for Claude Code/Codex, which don't
 require or forbid any stdout output).
+
+## The review gate (issue #178)
+
+A minimal human-in-the-loop control on top of the same socket: an agent's
+`PreToolUse`-equivalent hook sends `review_gate {state: "waiting", prompt}`
+and — unlike every other hook message — **keeps its connection open**
+instead of fire-and-forget, blocking until a real decision arrives. A human
+clicks Approve or (optionally with a reason) Deny in the notification bell
+panel (`NotificationBell.tsx`), which calls
+`POST /api/sessions/:id/review-gate {decision, reason?}`; the backend
+(`src/plugins/hooks.ts`) writes `{"decision": "approved" | "denied",
+"reason"?}` back on that still-open connection, the forwarder relays it in
+the agent's own decision dialect (`formatGateDecision` in
+`forwarder-core.mjs`) on stdout, and exits.
+
+Only **Claude Code's `PreToolUse` (Bash only)** has a real gate dialect
+wired up today — see issue #264 for why Codex, agy, and OpenCode don't yet.
+
+**Fail-closed, always.** Every error path resolves to a denial, never a
+silent allow:
+
+- No pending gate for a session (already resolved, or nothing was ever
+  waiting) → the REST endpoint reports 409/`{ok: false}`, no decision is
+  fabricated.
+- A second `review_gate: waiting` arriving for a session that already has
+  one pending is denied **immediately, on that connection only** — the
+  first gate's pending state is left completely undisturbed. (Two gates for
+  one session can't share this minimal slice's single-pending-per-session
+  bookkeeping without a wire-protocol correlation id; queuing silently would
+  risk the human's decision reaching the wrong tool call.)
+- A server-side timeout (`hooks.ts`'s `GATE_TIMEOUT_MS`, 290s) auto-denies
+  if nobody ever answers, comfortably under Claude Code's own 300s
+  `PreToolUse` hook timeout (itself confirmed to fail closed on expiry) —
+  Mullion controls the denial and its reason, rather than leaving it to the
+  agent's own less-informative timeout behavior.
+- The forwarder has its own, shorter internal timeout too (280s) and treats
+  a dropped connection or a malformed reply the same way: deny.
+- If the socket itself is unavailable when a `PreToolUse` hook fires at all
+  (hooks disabled, or the agent invoked outside a Mullion session), the
+  forwarder never enters the gate branch in the first place — that's the
+  ordinary "hooks disabled" no-op, not a gate to fail closed on.
+
+**Persistence note:** gate state (`SessionInfo.gateState`/`gatePrompt`) is
+in-memory only, same as every other live PtyManager field — resets to
+`"idle"` across a restart. Persisting an open gate across a restart is an
+explicit, tracked gap (ahead of Phase 4's own persistence work), not built
+in this minimal slice.
 
 ### Removing managed hooks
 

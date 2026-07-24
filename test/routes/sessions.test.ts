@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import net from "node:net";
 import { EventEmitter } from "node:events";
 
 // Session creation spawns real OS processes (systemd-run, dtach) via
@@ -408,6 +409,153 @@ describe("sessions route", () => {
     });
   });
 
+  describe("POST /api/sessions/:id/review-gate (issue #178)", () => {
+    /** Opens a real socket against app.pty.hookSocketPath, handshakes, and
+     * sends a `review_gate: waiting` message — the same round-trip
+     * forwarder.mjs's runGate() does — then waits for it to actually land
+     * (session.gateState flips to "waiting") before returning the raw
+     * socket, so the route under test has a real pending gate to resolve. */
+    async function openPendingGate(
+      app_: Awaited<ReturnType<typeof buildApp>>,
+      sessionId: number,
+      prompt: string,
+    ): Promise<net.Socket> {
+      const session = app_.pty.get(String(sessionId));
+      if (!session) throw new Error("session not tracked");
+      const socket = await new Promise<net.Socket>((resolve, reject) => {
+        const s = net.createConnection(app_.pty.hookSocketPath);
+        s.once("connect", () => resolve(s));
+        s.once("error", reject);
+      });
+      socket.write(`${JSON.stringify({ token: session.hookToken })}\n`);
+      socket.write(`${JSON.stringify({ kind: "review_gate", state: "waiting", prompt })}\n`);
+      await waitUntil(() => session.toInfo().gateState === "waiting");
+      return socket;
+    }
+
+    it("400s an invalid session id", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/sessions/not-a-number/review-gate",
+        payload: { decision: "approved" },
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it("404s an unknown session id", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/sessions/999999/review-gate",
+        payload: { decision: "approved" },
+      });
+      expect(res.statusCode).toBe(404);
+      await app.close();
+    });
+
+    it("409s when no review is currently pending for a real session", async () => {
+      const app = await buildApp();
+      const projectId = await createProject(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/review-gate`,
+        payload: { decision: "approved" },
+      });
+      expect(res.statusCode).toBe(409);
+      await app.close();
+    });
+
+    it("delivers an approve decision to the pending gate connection and flips gateState", async () => {
+      const app = await buildApp();
+      const projectId = await createProject(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const socket = await openPendingGate(app, sessionId, "rm -rf /tmp/scratch");
+      const replyPromise = new Promise<string>((resolve) => {
+        socket.on("data", (chunk: Buffer) => resolve(chunk.toString("utf8").trim()));
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/review-gate`,
+        payload: { decision: "approved" },
+      });
+      expect(res.statusCode).toBe(204);
+
+      expect(JSON.parse(await replyPromise)).toEqual({ decision: "approved" });
+      const list = await app.inject({ method: "GET", url: `/api/sessions?projectId=${projectId}` });
+      expect(list.json()).toEqual([
+        expect.objectContaining({ id: sessionId, gateState: "approved", gatePrompt: null }),
+      ]);
+
+      socket.destroy();
+      await app.close();
+    });
+
+    it("delivers a deny decision with a reason", async () => {
+      const app = await buildApp();
+      const projectId = await createProject(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const socket = await openPendingGate(app, sessionId, "curl http://evil.example");
+      const replyPromise = new Promise<string>((resolve) => {
+        socket.on("data", (chunk: Buffer) => resolve(chunk.toString("utf8").trim()));
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/review-gate`,
+        payload: { decision: "denied", reason: "looks unsafe" },
+      });
+      expect(res.statusCode).toBe(204);
+      expect(JSON.parse(await replyPromise)).toEqual({
+        decision: "denied",
+        reason: "looks unsafe",
+      });
+
+      socket.destroy();
+      await app.close();
+    });
+
+    it("400s an unrecognized decision value", async () => {
+      const app = await buildApp();
+      const projectId = await createProject(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { projectId, command: "bash" },
+      });
+      const sessionId = created.json().id;
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${sessionId}/review-gate`,
+        payload: { decision: "maybe" },
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+  });
+
   describe("multi-host (issue #26)", () => {
     async function createRemoteProject(app: Awaited<ReturnType<typeof buildApp>>) {
       const host = await app.inject({
@@ -540,6 +688,26 @@ describe("sessions route", () => {
         url: `/api/sessions/${orphan.id}/uploads`,
         headers: { "content-type": "image/png" },
         payload: PNG_BYTES,
+      });
+      expect(res.statusCode).toBe(502);
+
+      await app.close();
+    });
+
+    it("502s a review-gate decision for a session whose remote host is unreachable (issue #178)", async () => {
+      const app = await buildApp();
+      const { sessions } = await import("../../src/db/schema.js");
+      const projectId = await createRemoteProject(app);
+      const [orphan] = app.db
+        .insert(sessions)
+        .values({ projectId, command: "bash" })
+        .returning()
+        .all();
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${orphan.id}/review-gate`,
+        payload: { decision: "approved" },
       });
       expect(res.statusCode).toBe(502);
 

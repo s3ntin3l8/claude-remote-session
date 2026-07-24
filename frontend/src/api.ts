@@ -108,6 +108,12 @@ export interface Session {
   attention: boolean;
   attentionAt: number | null;
   lastTitle: string | null;
+  // Minimal review gate (Phase 2, issue #178) — mirrors
+  // src/services/pty-manager.ts's SessionInfo.gateState/gatePrompt 1:1. Live
+  // in-memory state, same fallback-to-defaults posture as every other live
+  // field above.
+  gateState: "idle" | "waiting" | "approved" | "denied";
+  gatePrompt: string | null;
 }
 
 // Phase 1's notification event model (issue #166) — mirrors
@@ -697,6 +703,14 @@ export const api = {
     }),
 
   deleteSession: (id: number) => request<void>(`/api/sessions/${id}`, { method: "DELETE" }),
+
+  // Minimal review gate (issue #178) — delivers a human's Approve/Deny
+  // decision (NotificationBell.tsx) for a session's pending `review_gate`.
+  resolveReviewGate: (id: number, decision: "approved" | "denied", reason?: string) =>
+    request<void>(`/api/sessions/${id}/review-gate`, {
+      method: "POST",
+      body: JSON.stringify({ decision, ...(reason !== undefined ? { reason } : {}) }),
+    }),
 
   // Issue #68: uploads a pasted/attached image (Blob straight off the
   // clipboard or a file input — never re-encoded) so the backend can write

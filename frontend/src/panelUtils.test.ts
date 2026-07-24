@@ -67,6 +67,8 @@ const EXISTING_SESSION: Session = {
   attention: false,
   attentionAt: null,
   lastTitle: null,
+  gateState: "idle",
+  gatePrompt: null,
 };
 
 const NEW_SESSION: Session = {

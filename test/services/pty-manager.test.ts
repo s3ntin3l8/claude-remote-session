@@ -1656,6 +1656,76 @@ describe("PtyManager", () => {
     it("PtyManager.emitHookEvent() is a no-op for an id it isn't tracking", () => {
       expect(() => manager.emitHookEvent("999", { kind: "progress", phase: "done" })).not.toThrow();
     });
+
+    it("review_gate: waiting sets SessionInfo.gateState/gatePrompt; a resolved state clears the prompt", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+      expect(session.toInfo()).toMatchObject({ gateState: "idle", gatePrompt: null });
+
+      session.emitHookEvent({ kind: "review_gate", state: "waiting", prompt: "Deploy?" });
+      expect(session.toInfo()).toMatchObject({ gateState: "waiting", gatePrompt: "Deploy?" });
+
+      session.emitHookEvent({ kind: "review_gate", state: "approved", prompt: "Deploy?" });
+      expect(session.toInfo()).toMatchObject({ gateState: "approved", gatePrompt: null });
+    });
+  });
+
+  describe("resolveGate (issue #178)", () => {
+    it("Session.resolveGate flips gateState/clears gatePrompt and emits a review_gate event with the outcome", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+      session.emitHookEvent({ kind: "review_gate", state: "waiting", prompt: "Deploy?" });
+
+      session.resolveGate("denied", "looks unsafe");
+
+      expect(session.toInfo()).toMatchObject({ gateState: "denied", gatePrompt: null });
+      const events = session.getEvents();
+      expect(events[events.length - 1]).toMatchObject({
+        kind: "review_gate",
+        payload: { state: "denied", reason: "looks unsafe" },
+      });
+    });
+
+    it("Session.resolveGate omits `reason` from the event payload when none is given", async () => {
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      session.resolveGate("approved");
+
+      const events = session.getEvents();
+      expect(events[events.length - 1].payload).toEqual({ state: "approved" });
+    });
+
+    it("PtyManager.resolveGate() routes to the right session by id and is a no-op for an untracked id", async () => {
+      const a = manager.getOrCreate({ id: "1", cwd: "/tmp", command: "bash", cols: 80, rows: 24 });
+      const b = manager.getOrCreate({ id: "2", cwd: "/tmp", command: "bash", cols: 80, rows: 24 });
+      await waitForSpawn(a);
+      await waitForSpawn(b);
+
+      manager.resolveGate("2", "approved");
+
+      expect(a.toInfo().gateState).toBe("idle");
+      expect(b.toInfo().gateState).toBe("approved");
+      expect(() => manager.resolveGate("999", "denied")).not.toThrow();
+    });
   });
 
   // Confirms bootstrapMaster() actually wires applyHookAdapters() in — the

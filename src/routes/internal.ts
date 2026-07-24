@@ -108,6 +108,31 @@ const terminateSchema = {
   },
 };
 
+interface ReviewGateBody {
+  decision: "approved" | "denied";
+  reason?: string;
+}
+
+// Issue #178 — the agent-side counterpart of POST /api/sessions/:id/review-gate.
+const reviewGateSchema = {
+  params: {
+    type: "object",
+    required: ["id"],
+    properties: {
+      id: SESSION_ID_SCHEMA,
+    },
+  },
+  body: {
+    type: "object",
+    required: ["decision"],
+    additionalProperties: false,
+    properties: {
+      decision: { type: "string", enum: ["approved", "denied"] },
+      reason: { type: "string" },
+    },
+  },
+};
+
 // Not a public rate limit exemption — a distinct, higher ceiling. A primary
 // polling this agent's bulk live-status/liveness endpoints at the reconcile
 // cadence (a follow-up PR) is legitimate, frequent traffic from a single
@@ -457,6 +482,22 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       await app.pty.terminate(request.params.id);
       reply.code(204);
+    },
+  );
+
+  // Issue #178 — mirrors POST /api/sessions/:id/review-gate's shape but
+  // returns `{ok}` rather than 204: unlike terminate (always succeeds for a
+  // tracked id), a decision can genuinely arrive with nothing pending to
+  // resolve (already resolved, timed out — see hooks.ts's
+  // resolvePendingGate), and the primary needs to know that to answer its
+  // own caller correctly instead of reporting a false success.
+  app.post<{ Params: { id: string }; Body: ReviewGateBody }>(
+    "/internal/sessions/:id/review-gate",
+    { ...INTERNAL_RATE_LIMIT, schema: reviewGateSchema },
+    async (request) => {
+      const { decision, reason } = request.body;
+      const ok = app.resolveHookGate(request.params.id, decision, reason);
+      return { ok };
     },
   );
 

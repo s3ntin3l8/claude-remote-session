@@ -27,6 +27,12 @@ export interface SessionBackend {
   // on whichever host actually runs that session's CLI, since a file path
   // is only useful to a process that can open it — and returns that path.
   uploadImage(cwd: string, buffer: Buffer, mime: string): Promise<{ path: string }>;
+  // Issue #178 — delivers a human decision to a pending review gate, on
+  // whichever host is actually holding the open hook connection (only that
+  // process's hooks.ts can write the reply — see that file's
+  // resolvePendingGate). Returns false if no gate is currently pending for
+  // this session (already resolved, timed out, or its connection died).
+  resolveReviewGate(id: string, decision: "approved" | "denied", reason?: string): Promise<boolean>;
 }
 
 class LocalBackend implements SessionBackend {
@@ -73,6 +79,14 @@ class LocalBackend implements SessionBackend {
   async uploadImage(cwd: string, buffer: Buffer, mime: string): Promise<{ path: string }> {
     return { path: saveSessionUpload(cwd, buffer, mime) };
   }
+
+  async resolveReviewGate(
+    id: string,
+    decision: "approved" | "denied",
+    reason?: string,
+  ): Promise<boolean> {
+    return this.app.resolveHookGate(id, decision, reason);
+  }
 }
 
 class RemoteBackend implements SessionBackend {
@@ -109,6 +123,14 @@ class RemoteBackend implements SessionBackend {
 
   uploadImage(cwd: string, buffer: Buffer, mime: string): Promise<{ path: string }> {
     return this.client.uploadImage(cwd, buffer, mime);
+  }
+
+  resolveReviewGate(
+    id: string,
+    decision: "approved" | "denied",
+    reason?: string,
+  ): Promise<boolean> {
+    return this.client.resolveReviewGate(id, decision, reason);
   }
 }
 

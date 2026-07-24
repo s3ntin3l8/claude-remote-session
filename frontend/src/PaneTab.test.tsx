@@ -102,6 +102,8 @@ const BASE_SESSION: Session = {
   attention: false,
   attentionAt: null,
   lastTitle: null,
+  gateState: "idle",
+  gatePrompt: null,
 };
 
 function makeEvent(overrides: Partial<NotificationEvent> = {}): NotificationEvent {

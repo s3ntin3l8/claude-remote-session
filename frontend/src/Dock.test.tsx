@@ -305,6 +305,8 @@ describe("Dock", () => {
         attention: false,
         attentionAt: null,
         lastTitle: null,
+        gateState: "idle",
+        gatePrompt: null,
       };
       useDashboardStore.setState({
         projects: [PROJECT],
