@@ -104,21 +104,27 @@ curl localhost:3000/api/projects
   proxy + HMR websocket proxying for browser previews — see
   [`docs/browser-previews.md`](docs/browser-previews.md); fully inert until
   `PREVIEW_BASE_HOST` is set), `hooks` (`app.hookServer` — the Phase 2 agent
-  hook socket, `MULLION_HOOK_SOCKET` injected per-session; see
-  [`docs/agent-hooks.md`](docs/agent-hooks.md)).
+  hook socket, `MULLION_HOOK_SOCKET` injected per-session, plus
+  `app.resolveHookGate` for the minimal review gate's decision round-trip;
+  see [`docs/agent-hooks.md`](docs/agent-hooks.md)).
 - `src/routes/` — `health` (`/health`, `/ready`), `auth` (`/api/auth/login`,
   `/logout`, `/me`, and `/oidc/login`, `/oidc/callback` — see
   [`docs/auth.md`](docs/auth.md)), `users` (template-inherited example
   CRUD), `root` (placeholder `/`, disabled once
   the frontend build exists — also template-inherited), `projects` (CRUD +
   discovery + per-project actions/dock), `sessions` (durable terminal
-  sessions), `workspaces` (named/grouped saved layouts), `groups` (workspace
+  sessions, including `POST /api/sessions/:id/review-gate` — the minimal
+  review gate's decision endpoint, see
+  [`docs/agent-hooks.md`](docs/agent-hooks.md)), `workspaces`
+  (named/grouped saved layouts), `groups` (workspace
   groups), `agents` (installed shell/AI-CLI detection), `actions` (global
   launcher presets), `server-info` (`GET /api/server-info`, read-only
   diagnostics for Settings → Server info), `terminal` (`/ws/terminal` PTY
   bridge), `hosts` (remote-host registry for multi-host sessions), `internal`
   (an `agent` process's token-gated API, called by a `primary`'s host
-  routing), `integrations` (GitHub PAT/device-flow connect — see
+  routing — including its own `POST /internal/sessions/:id/review-gate`, so
+  a review-gate decision reaches whichever host actually holds the pending
+  hook connection), `integrations` (GitHub PAT/device-flow connect — see
   [`docs/github-integration.md`](docs/github-integration.md)), `previews`
   (create/read/delete browser previews — see
   [`docs/browser-previews.md`](docs/browser-previews.md)).

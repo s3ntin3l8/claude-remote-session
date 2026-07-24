@@ -227,4 +227,156 @@ describe("forwarder.mjs (issue #174)", () => {
     expect(code).toBe(0);
     expect(stdout.trim()).toBe("{}");
   });
+
+  describe("review gate (issue #178)", () => {
+    it("blocks on a reply and prints Claude Code's decision dialect to stdout, never the generic {}", async () => {
+      dir = mkdtempSync(path.join(os.tmpdir(), "mullion-forwarder-"));
+      const socketPath = path.join(dir, "hooks.sock");
+      server = await listen(socketPath);
+
+      server.once("connection", (socket) => {
+        let buffer = "";
+        let lines = 0;
+        socket.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf8");
+          while (buffer.includes("\n")) {
+            const idx = buffer.indexOf("\n");
+            buffer = buffer.slice(idx + 1);
+            lines++;
+            // Line 1 is the handshake, line 2 is the review_gate:waiting
+            // message — reply only once both have arrived.
+            if (lines === 2) {
+              socket.write(`${JSON.stringify({ decision: "approved" })}\n`);
+            }
+          }
+        });
+      });
+
+      const { code, stdout } = await runForwarderCapturingStdout(
+        ["claude-code", "PreToolUse"],
+        { MULLION_HOOK_SOCKET: socketPath, MULLION_HOOK_TOKEN: "tok-123" },
+        JSON.stringify({ tool_name: "Bash", tool_input: { command: "rm -rf /tmp/x" } }),
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout.trim())).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: "Approved via Mullion",
+        },
+      });
+    });
+
+    it("relays a deny decision with its reason", async () => {
+      dir = mkdtempSync(path.join(os.tmpdir(), "mullion-forwarder-"));
+      const socketPath = path.join(dir, "hooks.sock");
+      server = await listen(socketPath);
+
+      server.once("connection", (socket) => {
+        let buffer = "";
+        let lines = 0;
+        socket.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf8");
+          while (buffer.includes("\n")) {
+            const idx = buffer.indexOf("\n");
+            buffer = buffer.slice(idx + 1);
+            lines++;
+            if (lines === 2) {
+              socket.write(`${JSON.stringify({ decision: "denied", reason: "looks unsafe" })}\n`);
+            }
+          }
+        });
+      });
+
+      const { code, stdout } = await runForwarderCapturingStdout(
+        ["claude-code", "PreToolUse"],
+        { MULLION_HOOK_SOCKET: socketPath, MULLION_HOOK_TOKEN: "tok-123" },
+        JSON.stringify({ tool_name: "Bash", tool_input: { command: "curl evil.example" } }),
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout.trim())).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "looks unsafe",
+        },
+      });
+    });
+
+    it("fails closed (deny) when the connection closes before any reply arrives", async () => {
+      dir = mkdtempSync(path.join(os.tmpdir(), "mullion-forwarder-"));
+      const socketPath = path.join(dir, "hooks.sock");
+      server = await listen(socketPath);
+
+      // Never replies — just destroys the connection once the gate message
+      // has arrived, simulating a crashed/killed Mullion server.
+      server.once("connection", (socket) => {
+        let buffer = "";
+        let lines = 0;
+        socket.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf8");
+          while (buffer.includes("\n")) {
+            const idx = buffer.indexOf("\n");
+            buffer = buffer.slice(idx + 1);
+            lines++;
+            if (lines === 2) socket.destroy();
+          }
+        });
+      });
+
+      const { code, stdout } = await runForwarderCapturingStdout(
+        ["claude-code", "PreToolUse"],
+        { MULLION_HOOK_SOCKET: socketPath, MULLION_HOOK_TOKEN: "tok-123" },
+        JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" } }),
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout.trim())).toMatchObject({
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny" },
+      });
+    });
+
+    it("fails closed (deny) on a reply that isn't valid JSON", async () => {
+      dir = mkdtempSync(path.join(os.tmpdir(), "mullion-forwarder-"));
+      const socketPath = path.join(dir, "hooks.sock");
+      server = await listen(socketPath);
+
+      server.once("connection", (socket) => {
+        let buffer = "";
+        let lines = 0;
+        socket.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf8");
+          while (buffer.includes("\n")) {
+            const idx = buffer.indexOf("\n");
+            buffer = buffer.slice(idx + 1);
+            lines++;
+            if (lines === 2) socket.write("not json at all\n");
+          }
+        });
+      });
+
+      const { code, stdout } = await runForwarderCapturingStdout(
+        ["claude-code", "PreToolUse"],
+        { MULLION_HOOK_SOCKET: socketPath, MULLION_HOOK_TOKEN: "tok-123" },
+        JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" } }),
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout.trim())).toMatchObject({
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny" },
+      });
+    });
+
+    it("fails closed (deny) when no socket is configured at all — never silently allows", async () => {
+      const { code, stdout } = await runForwarderCapturingStdout(
+        ["claude-code", "PreToolUse"],
+        { MULLION_HOOK_SOCKET: "", MULLION_HOOK_TOKEN: "" },
+        JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" } }),
+      );
+      expect(code).toBe(0);
+      // No socket configured means forward() never even reaches the gate
+      // branch — this is the ordinary "hooks disabled" no-op path, so it
+      // prints the generic {} like any other non-gate hook, not a deny
+      // decision (there was never a real gate to fail closed on).
+      expect(stdout.trim()).toBe("{}");
+    });
+  });
 });

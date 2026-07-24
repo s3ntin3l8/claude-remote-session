@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { vi } from "vitest";
 import { EventEmitter } from "node:events";
@@ -704,6 +705,98 @@ describe("internal routes (agent role, issue #26)", () => {
     expect(terminateRes.statusCode).toBe(204);
 
     await app.close();
+  });
+
+  describe("POST /internal/sessions/:id/review-gate (issue #178)", () => {
+    it("delivers a decision to a real pending gate and reports {ok: true}", async () => {
+      const app = await buildApp();
+      const before = fakePtyChildren.length;
+      await app.inject({
+        method: "POST",
+        url: "/internal/sessions",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { id: "9001", cwd: "/tmp", command: "bash", cols: 80, rows: 24 },
+      });
+      await waitUntil(() => fakePtyChildren.length > before);
+      const session = app.pty.get("9001");
+      if (!session) throw new Error("session not tracked");
+
+      const socket = await new Promise<net.Socket>((resolve, reject) => {
+        const s = net.createConnection(app.pty.hookSocketPath);
+        s.once("connect", () => resolve(s));
+        s.once("error", reject);
+      });
+      socket.write(`${JSON.stringify({ token: session.hookToken })}\n`);
+      socket.write(
+        `${JSON.stringify({ kind: "review_gate", state: "waiting", prompt: "rm -rf /tmp/x" })}\n`,
+      );
+      await waitUntil(() => session.toInfo().gateState === "waiting");
+
+      const replyPromise = new Promise<string>((resolve) => {
+        socket.on("data", (chunk: Buffer) => resolve(chunk.toString("utf8").trim()));
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/internal/sessions/9001/review-gate",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { decision: "approved" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      expect(JSON.parse(await replyPromise)).toEqual({ decision: "approved" });
+      expect(session.toInfo().gateState).toBe("approved");
+
+      socket.destroy();
+      await app.close();
+    });
+
+    it("reports {ok: false} when nothing is pending for this session", async () => {
+      const app = await buildApp();
+      const before = fakePtyChildren.length;
+      await app.inject({
+        method: "POST",
+        url: "/internal/sessions",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { id: "9002", cwd: "/tmp", command: "bash", cols: 80, rows: 24 },
+      });
+      await waitUntil(() => fakePtyChildren.length > before);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/internal/sessions/9002/review-gate",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { decision: "denied", reason: "nothing pending" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: false });
+
+      await app.close();
+    });
+
+    it("rejects a request with the wrong token", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/internal/sessions/9003/review-gate",
+        headers: { authorization: "Bearer wrong" },
+        payload: { decision: "approved" },
+      });
+      expect(res.statusCode).toBe(401);
+      await app.close();
+    });
+
+    it("400s an unrecognized decision value", async () => {
+      const app = await buildApp();
+      const res = await app.inject({
+        method: "POST",
+        url: "/internal/sessions/9004/review-gate",
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { decision: "maybe" },
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
   });
 
   it("expands a leading ~ in a spawned session's cwd against this host's own home dir", async () => {

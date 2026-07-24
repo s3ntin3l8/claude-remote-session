@@ -245,6 +245,30 @@ export class RemoteHostClient {
   }
 
   /**
+   * Delivers a review-gate decision (issue #178) to whichever host actually
+   * holds the pending hook connection — the agent's own
+   * /internal/sessions/:id/review-gate, mirroring
+   * /internal/sessions/:id/terminate's shape but with a real JSON response
+   * body (`{ok}`) rather than a bare 204, since the caller needs to know
+   * whether a gate was actually pending to resolve.
+   */
+  async resolveReviewGate(
+    id: string,
+    decision: "approved" | "denied",
+    reason?: string,
+  ): Promise<boolean> {
+    const result = await this.request<{ ok: boolean }>(
+      `/internal/sessions/${encodeURIComponent(id)}/review-gate`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision, reason }),
+      },
+    );
+    return result.ok;
+  }
+
+  /**
    * Uploads a pasted/attached image (issue #68) to this agent's own
    * `/internal/uploads`, which writes it under the given session cwd — on
    * *this* host's filesystem, not the primary's, since that's where the

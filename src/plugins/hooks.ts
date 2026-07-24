@@ -31,7 +31,67 @@ import { parseHookMessage } from "../services/hook-protocol.js";
 // instead of the write direction.
 const MAX_LINE_BYTES = 64 * 1024;
 
-function handleConnection(app: FastifyInstance, socket: net.Socket): void {
+// Minimal review gate (Phase 2, issue #178). A `review_gate {state:
+// "waiting"}` message keeps its connection open (see handleConnection below)
+// instead of the fire-and-forget notify-then-close every other hook kind
+// uses; this map tracks that open connection per session so a later
+// decision (POST /api/sessions/:id/review-gate, routed here via
+// app.resolveHookGate) knows which socket to write the reply to.
+//
+// One gate at a time per session, by design: Claude Code (and any future
+// gating agent) can in principle fire two PreToolUse hooks concurrently for
+// the same session (parallel tool calls), which would otherwise silently
+// overwrite this map's entry — the human's decision would then only ever
+// reach whichever connection registered *second*, leaving the first
+// wedged until its own hook-level timeout. Rather than thread a
+// correlation id through the wire protocol for a "minimal" slice, a second
+// concurrent waiting gate for an already-pending session is denied
+// immediately (see handleConnection) — safe-fails-closed, and the first
+// gate's own pending state is left completely undisturbed.
+interface PendingGate {
+  socket: net.Socket;
+  timer: NodeJS.Timeout;
+}
+
+// Must stay comfortably below every gating adapter's own hook-level
+// `timeout` (claude-code.ts's PreToolUse entry sets 300s) — the whole point
+// of owning a server-side timeout here, rather than relying solely on the
+// forwarder's own internal one (see forwarder.mjs's GATE_TIMEOUT_MS), is
+// that Mullion controls the fail-closed decision and can update gateState
+// accordingly; if the agent's own hook timeout fired first instead, its
+// on-expiry behavior is per-agent and only confirmed for Claude Code (see
+// the plan's PR9 timeout note).
+export const GATE_TIMEOUT_MS = 290_000;
+
+/** Writes a decision back to a still-open gate connection and clears its
+ * bookkeeping — shared by the server-side timeout above and
+ * app.resolveHookGate (called from POST /api/sessions/:id/review-gate).
+ * Returns false, touching nothing, if no gate is currently pending for this
+ * session (already resolved, timed out, or the connection died — see the
+ * `close` handler below) so the caller can report "nothing to resolve"
+ * rather than silently no-op. */
+function resolvePendingGate(
+  app: FastifyInstance,
+  pendingGates: Map<string, PendingGate>,
+  sessionId: string,
+  decision: { decision: "approved" | "denied"; reason?: string },
+): boolean {
+  const pending = pendingGates.get(sessionId);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingGates.delete(sessionId);
+  if (pending.socket.writable) {
+    pending.socket.write(`${JSON.stringify(decision)}\n`);
+  }
+  app.pty.resolveGate(sessionId, decision.decision, decision.reason);
+  return true;
+}
+
+function handleConnection(
+  app: FastifyInstance,
+  socket: net.Socket,
+  pendingGates: Map<string, PendingGate>,
+): void {
   let buffer = "";
   // null until the handshake line resolves to a real session id — every
   // subsequent line on this connection is attributed to it. A connection
@@ -94,12 +154,75 @@ function handleConnection(app: FastifyInstance, socket: net.Socket): void {
       }
 
       app.log.debug({ sessionId, message: result.message }, "hook message received");
+
+      // Issue #178 — a blocking gate is the one message kind that keeps its
+      // connection open rather than fire-and-forget (see forwarder.mjs's
+      // runGate): register it so a later decision knows where to reply.
+      // See PendingGate's doc comment above for why a second concurrent
+      // waiting gate for the same session is denied immediately instead of
+      // silently overwriting the first's pending state.
+      if (result.message.kind === "review_gate" && result.message.state === "waiting") {
+        // A `const` capture, not the outer `let sessionId` directly: the
+        // setTimeout callback below is a separate function scope, and TS
+        // doesn't carry the `sessionId !== null` narrowing established
+        // above across that boundary for a mutable `let`.
+        const sid: string = sessionId;
+        if (pendingGates.has(sid)) {
+          // Denied immediately, on THIS connection only — deliberately does
+          // NOT reach app.pty.emitHookEvent below: the first gate is still
+          // the one truly pending, and routing this duplicate through
+          // emitHookEvent would overwrite SessionInfo.gateState/gatePrompt
+          // with this rejected prompt, even though pendingGates still
+          // points at the first connection's socket. See PendingGate's doc
+          // comment above for the full "why deny, not queue" reasoning.
+          app.log.warn(
+            { sessionId: sid },
+            "a review gate is already pending for this session, denying the newest one immediately",
+          );
+          if (socket.writable) {
+            socket.write(
+              `${JSON.stringify({
+                decision: "denied",
+                reason: "another review is already pending for this session",
+              })}\n`,
+            );
+          }
+          continue;
+        }
+        const timer = setTimeout(() => {
+          app.log.warn({ sessionId: sid }, "review gate timed out waiting for a decision");
+          resolvePendingGate(app, pendingGates, sid, {
+            decision: "denied",
+            reason: "timed out waiting for a decision",
+          });
+        }, GATE_TIMEOUT_MS);
+        pendingGates.set(sid, { socket, timer });
+      }
+
       app.pty.emitHookEvent(sessionId, result.message);
     }
   });
 
   socket.on("error", (err) => {
     app.log.debug({ err, sessionId }, "hook connection error");
+  });
+
+  // A gate connection that closes WITHOUT a decision ever being written
+  // (the forwarder process crashed, or something severed the connection)
+  // must still resolve the gate rather than leave gateState stuck on
+  // "waiting" forever — fail closed, same as the timeout above. Guarded on
+  // `pendingGates.get(sessionId)?.socket === socket` (not just
+  // `.has(sessionId)`) so this never clobbers a *different*, newer pending
+  // gate for the same session id — resolvePendingGate() already deletes the
+  // map entry as part of writing a real decision, so the ordinary
+  // resolved-then-closed path is already a no-op by the time this fires.
+  socket.on("close", () => {
+    if (sessionId === null) return;
+    if (pendingGates.get(sessionId)?.socket !== socket) return;
+    resolvePendingGate(app, pendingGates, sessionId, {
+      decision: "denied",
+      reason: "hook connection closed before a decision was made",
+    });
   });
 }
 
@@ -118,7 +241,12 @@ export const hooksPlugin = fp(async (app: FastifyInstance) => {
     // ENOENT is the expected case (no prior process, or it cleaned up fine).
   }
 
-  const server = net.createServer((socket) => handleConnection(app, socket));
+  // One Map per app instance (not module-level) — see PendingGate's doc
+  // comment above. Shared by every connection this server ever accepts, and
+  // by app.resolveHookGate below.
+  const pendingGates = new Map<string, PendingGate>();
+
+  const server = net.createServer((socket) => handleConnection(app, socket, pendingGates));
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -135,6 +263,19 @@ export const hooksPlugin = fp(async (app: FastifyInstance) => {
 
   app.decorate("hookServer", server);
 
+  // Issue #178 — the seam POST /api/sessions/:id/review-gate (via
+  // session-backend.ts's LocalBackend, and /internal/sessions/:id/review-gate
+  // for a remote host's own agent process) calls to deliver a real decision.
+  // Returns false if no gate is currently pending for this session (already
+  // resolved, timed out, or its connection died — see resolvePendingGate's
+  // doc comment) so the route can report "nothing to resolve" instead of a
+  // false success.
+  app.decorate(
+    "resolveHookGate",
+    (sessionId: string, decision: "approved" | "denied", reason?: string): boolean =>
+      resolvePendingGate(app, pendingGates, sessionId, { decision, reason }),
+  );
+
   // CodeQL (js/missing-rate-limiting) flags this hook: it performs a
   // filesystem access (unlinkSync) with no rate-limit decorator of its own.
   // Reviewed — not applicable, same category as the identical flag on
@@ -144,6 +285,11 @@ export const hooksPlugin = fp(async (app: FastifyInstance) => {
   // trigger a rate limiter could meaningfully throttle.
   app.addHook("onClose", () => {
     server.close();
+    // Any gate still pending at shutdown would otherwise leak its timer past
+    // process lifetime (harmless once the process exits, but real inside a
+    // single long-lived test run — see hooks.test.ts).
+    for (const pending of pendingGates.values()) clearTimeout(pending.timer);
+    pendingGates.clear();
     try {
       unlinkSync(socketPath);
     } catch {
@@ -155,5 +301,10 @@ export const hooksPlugin = fp(async (app: FastifyInstance) => {
 declare module "fastify" {
   interface FastifyInstance {
     hookServer: net.Server;
+    resolveHookGate: (
+      sessionId: string,
+      decision: "approved" | "denied",
+      reason?: string,
+    ) => boolean;
   }
 }

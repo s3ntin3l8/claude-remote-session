@@ -50,6 +50,14 @@ vi.mock("./store.js", () => {
   return { useDashboardStore, eventKey };
 });
 
+// Minimal review gate (issue #178) — GateActions calls api.resolveReviewGate
+// directly (not through the store), so it's mocked the same
+// selector-independent way.
+const resolveReviewGate = vi.fn(() => Promise.resolve());
+vi.mock("./api.js", () => ({
+  api: { resolveReviewGate: (...args: unknown[]) => resolveReviewGate(...args) },
+}));
+
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
     id: 1,
@@ -69,6 +77,8 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     attention: false,
     attentionAt: null,
     lastTitle: null,
+    gateState: "idle",
+    gatePrompt: null,
     ...overrides,
   };
 }
@@ -130,6 +140,8 @@ beforeEach(() => {
   notificationsPanelOpenRequest = 0;
   markEventSeen.mockClear();
   dismissEvent.mockClear();
+  resolveReviewGate.mockClear();
+  resolveReviewGate.mockResolvedValue(undefined);
   stubVirtualizerLayout();
 });
 
@@ -295,6 +307,104 @@ describe("notificationsPanelOpenRequest (issue #170)", () => {
     rerender(<NotificationBell onOpenSession={vi.fn()} />);
 
     expect(screen.getByText("No notifications yet")).toBeInTheDocument();
+  });
+});
+
+describe("review gate Approve/Deny (issue #178)", () => {
+  function makeGateEvent(overrides: Partial<NotificationEvent> = {}): NotificationEvent {
+    return {
+      seq: 1,
+      sessionId: 1,
+      kind: "review_gate",
+      ts: Date.now(),
+      payload: { state: "waiting", prompt: "Run rm -rf /tmp/build?" },
+      ...overrides,
+    };
+  }
+
+  it("shows Approve/Deny for a waiting review_gate row when the session's own gateState is waiting", async () => {
+    sessions = [makeSession({ gateState: "waiting", gatePrompt: "Run rm -rf /tmp/build?" })];
+    events = { 1: [makeGateEvent()] };
+    await openPanel();
+
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
+  });
+
+  it("does not show Approve/Deny once the session's gateState has moved past waiting, even though the waiting event is still in the feed", async () => {
+    sessions = [makeSession({ gateState: "approved" })];
+    events = { 1: [makeGateEvent()] };
+    await openPanel();
+
+    expect(screen.getByText(/Waiting for review/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+  });
+
+  it("Approve calls api.resolveReviewGate with the session id and 'approved', without opening the session", async () => {
+    sessions = [makeSession({ gateState: "waiting", gatePrompt: "x" })];
+    events = { 1: [makeGateEvent()] };
+    const onOpenSession = await openPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(resolveReviewGate).toHaveBeenCalledWith(1, "approved");
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it("Deny opens an inline reason field instead of submitting immediately", async () => {
+    sessions = [makeSession({ gateState: "waiting", gatePrompt: "x" })];
+    events = { 1: [makeGateEvent()] };
+    await openPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+
+    expect(resolveReviewGate).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText("Reason (optional)")).toBeInTheDocument();
+  });
+
+  it("confirming Deny with a typed reason submits it, trimmed", async () => {
+    sessions = [makeSession({ gateState: "waiting", gatePrompt: "x" })];
+    events = { 1: [makeGateEvent()] };
+    await openPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await userEvent.type(screen.getByPlaceholderText("Reason (optional)"), "  looks unsafe  ");
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+
+    expect(resolveReviewGate).toHaveBeenCalledWith(1, "denied", "looks unsafe");
+  });
+
+  it("confirming Deny with no reason typed submits undefined, not an empty string", async () => {
+    sessions = [makeSession({ gateState: "waiting", gatePrompt: "x" })];
+    events = { 1: [makeGateEvent()] };
+    await openPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+
+    expect(resolveReviewGate).toHaveBeenCalledWith(1, "denied", undefined);
+  });
+
+  it("Cancel returns to the Approve/Deny buttons without submitting", async () => {
+    sessions = [makeSession({ gateState: "waiting", gatePrompt: "x" })];
+    events = { 1: [makeGateEvent()] };
+    await openPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(resolveReviewGate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
+  it("clicking Approve/Deny does not bubble into the row's own onOpen click handler", async () => {
+    sessions = [makeSession({ gateState: "waiting", gatePrompt: "x" })];
+    events = { 1: [makeGateEvent()] };
+    const onOpenSession = await openPanel();
+
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(onOpenSession).not.toHaveBeenCalled();
   });
 });
 

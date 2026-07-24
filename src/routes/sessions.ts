@@ -30,6 +30,11 @@ interface RenameSessionBody {
   name: string;
 }
 
+interface ReviewGateBody {
+  decision: "approved" | "denied";
+  reason?: string;
+}
+
 const createSessionSchema = {
   body: {
     type: "object",
@@ -52,6 +57,21 @@ const renameSessionSchema = {
     additionalProperties: false,
     properties: {
       name: { type: "string", minLength: 1 },
+    },
+  },
+};
+
+// Issue #178 — the minimal review gate's one write endpoint: delivers a
+// human's Approve/Deny decision (NotificationBell.tsx) to whichever open
+// hook connection is currently blocked waiting for one.
+const reviewGateSchema = {
+  body: {
+    type: "object",
+    required: ["decision"],
+    additionalProperties: false,
+    properties: {
+      decision: { type: "string", enum: ["approved", "denied"] },
+      reason: { type: "string" },
     },
   },
 };
@@ -79,6 +99,10 @@ function withLiveInfo(row: typeof sessions.$inferSelect, info: SessionInfo | nul
     attention: info?.attention ?? false,
     attentionAt: info?.attentionAt ?? null,
     lastTitle: info?.lastTitle ?? null,
+    // Issue #178 — same live/in-memory, host-tracked-only fallback as every
+    // other field above.
+    gateState: info?.gateState ?? "idle",
+    gatePrompt: info?.gatePrompt ?? null,
   };
 }
 
@@ -261,6 +285,40 @@ export async function sessionsRoute(app: FastifyInstance) {
       const idleThresholdMs = getStoredSettings(app.db).notifications.idleThresholdSeconds * 1000;
       const hostId = resolveProjectHostId(app, updated[0].projectId);
       return withLiveStatus(app, updated[0], idleThresholdMs, hostId);
+    },
+  );
+
+  // Issue #178 — delivers a human decision to a pending review gate, routed
+  // (via resolveBackend, same as terminate/uploadImage) to whichever host
+  // actually holds the open hook connection. 409, not 404/500, when nothing
+  // is pending: the session and its host are both perfectly valid, there's
+  // just no gate left to answer (already resolved, timed out, or the
+  // connection died — see hooks.ts's resolvePendingGate).
+  app.post<{ Params: { id: string }; Body: ReviewGateBody }>(
+    "/api/sessions/:id/review-gate",
+    { schema: reviewGateSchema },
+    async (request, reply) => {
+      const sessionId = Number(request.params.id);
+      if (!Number.isInteger(sessionId)) return reply.badRequest("Invalid session id");
+
+      const [row] = app.db.select().from(sessions).where(eq(sessions.id, sessionId)).all();
+      if (!row) return reply.notFound();
+
+      const hostId = resolveProjectHostId(app, row.projectId);
+      const { decision, reason } = request.body;
+      let ok: boolean;
+      try {
+        ok = await resolveBackend(app, hostId).resolveReviewGate(
+          String(sessionId),
+          decision,
+          reason,
+        );
+      } catch (err) {
+        app.log.error({ err, sessionId, hostId }, "review-gate decision failed to reach host");
+        return reply.badGateway("Failed to deliver decision to host");
+      }
+      if (!ok) return reply.conflict("No review is currently pending for this session");
+      reply.code(204);
     },
   );
 

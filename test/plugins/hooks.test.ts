@@ -45,6 +45,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 const { buildApp } = await import("../../src/app.js");
+const { GATE_TIMEOUT_MS } = await import("../../src/plugins/hooks.js");
 
 /** Connects a raw net socket to `path`, resolving once actually connected. */
 function connect(path: string): Promise<net.Socket> {
@@ -344,6 +345,146 @@ describe("hooksPlugin (issue #172)", () => {
         true,
       );
       socket.destroy();
+    });
+  });
+
+  describe("review gate (issue #178)", () => {
+    async function openPendingGate(
+      app_: Awaited<ReturnType<typeof buildApp>>,
+      id: string,
+      prompt: string,
+    ) {
+      const session = app_.pty.getOrCreate({
+        id,
+        cwd: "/tmp",
+        command: "bash",
+        cols: 80,
+        rows: 24,
+      });
+      const socket = await connect(app_.pty.hookSocketPath);
+      socket.write(`${JSON.stringify({ token: session.hookToken })}\n`);
+      socket.write(`${JSON.stringify({ kind: "review_gate", state: "waiting", prompt })}\n`);
+      for (let i = 0; i < 50 && session.toInfo().gateState !== "waiting"; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(session.toInfo().gateState).toBe("waiting");
+      expect(session.toInfo().gatePrompt).toBe(prompt);
+      return { session, socket };
+    }
+
+    it("app.resolveHookGate writes an approve decision back to the pending connection and flips gateState", async () => {
+      app = await buildApp();
+      await app.ready();
+      const { session, socket } = await openPendingGate(app, "1", "rm -rf /tmp/scratch");
+
+      const replyPromise = waitForLine(socket);
+      expect(app.resolveHookGate("1", "approved")).toBe(true);
+
+      expect(JSON.parse(await replyPromise)).toEqual({ decision: "approved" });
+      expect(session.toInfo().gateState).toBe("approved");
+      expect(session.toInfo().gatePrompt).toBe(null);
+      const events = session.getEvents();
+      expect(events.some((e) => e.kind === "review_gate" && e.payload.state === "approved")).toBe(
+        true,
+      );
+      socket.destroy();
+    });
+
+    it("app.resolveHookGate writes a deny decision with a reason", async () => {
+      app = await buildApp();
+      await app.ready();
+      const { socket } = await openPendingGate(app, "1", "curl http://evil.example");
+
+      const replyPromise = waitForLine(socket);
+      expect(app.resolveHookGate("1", "denied", "looks unsafe")).toBe(true);
+
+      expect(JSON.parse(await replyPromise)).toEqual({
+        decision: "denied",
+        reason: "looks unsafe",
+      });
+      socket.destroy();
+    });
+
+    it("app.resolveHookGate returns false when nothing is pending for this session", async () => {
+      app = await buildApp();
+      await app.ready();
+      app.pty.getOrCreate({ id: "1", cwd: "/tmp", command: "bash", cols: 80, rows: 24 });
+
+      expect(app.resolveHookGate("1", "approved")).toBe(false);
+    });
+
+    it("denies a second concurrent waiting gate for the same session immediately, without disturbing the first", async () => {
+      app = await buildApp();
+      await app.ready();
+      const { session, socket: first } = await openPendingGate(app, "1", "first command");
+
+      const second = await connect(app.pty.hookSocketPath);
+      second.write(`${JSON.stringify({ token: session.hookToken })}\n`);
+      const secondReplyPromise = waitForLine(second);
+      second.write(
+        `${JSON.stringify({ kind: "review_gate", state: "waiting", prompt: "second command" })}\n`,
+      );
+
+      expect(JSON.parse(await secondReplyPromise)).toEqual({
+        decision: "denied",
+        reason: "another review is already pending for this session",
+      });
+      // The first gate is completely undisturbed.
+      expect(session.toInfo().gateState).toBe("waiting");
+      expect(session.toInfo().gatePrompt).toBe("first command");
+
+      expect(app.resolveHookGate("1", "approved")).toBe(true);
+      expect(session.toInfo().gateState).toBe("approved");
+
+      first.destroy();
+      second.destroy();
+    });
+
+    it("resolves to denied when the gate connection closes before a decision arrives (fail closed)", async () => {
+      app = await buildApp();
+      await app.ready();
+      const { session, socket } = await openPendingGate(app, "1", "some command");
+
+      socket.destroy();
+
+      for (let i = 0; i < 50 && session.toInfo().gateState === "waiting"; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(session.toInfo().gateState).toBe("denied");
+    });
+
+    it("resolves to denied on the server-side gate timeout (fail closed)", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        app = await buildApp();
+        await app.ready();
+        const session = app.pty.getOrCreate({
+          id: "1",
+          cwd: "/tmp",
+          command: "bash",
+          cols: 80,
+          rows: 24,
+        });
+        const socket = await connect(app.pty.hookSocketPath);
+        socket.write(`${JSON.stringify({ token: session.hookToken })}\n`);
+        const replyPromise = waitForLine(socket);
+        socket.write(`${JSON.stringify({ kind: "review_gate", state: "waiting", prompt: "x" })}\n`);
+        for (let i = 0; i < 50 && session.toInfo().gateState !== "waiting"; i++) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(session.toInfo().gateState).toBe("waiting");
+
+        await vi.advanceTimersByTimeAsync(GATE_TIMEOUT_MS);
+
+        expect(JSON.parse(await replyPromise)).toEqual({
+          decision: "denied",
+          reason: "timed out waiting for a decision",
+        });
+        expect(session.toInfo().gateState).toBe("denied");
+        socket.destroy();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

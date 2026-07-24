@@ -21,7 +21,7 @@ import {
   type AttentionTransition,
 } from "./attention-detect.js";
 import { buildSessionEnv } from "./session-env.js";
-import type { HookMessage } from "./hook-protocol.js";
+import type { HookMessage, ReviewGateHookMessage } from "./hook-protocol.js";
 import { applyHookAdapters, resolveForwarderPath } from "./hook-adapters/index.js";
 
 // Bridges browser terminals to real, host-persistent processes.
@@ -91,6 +91,18 @@ export interface SessionInfo {
    * classifyActivityFromTitle() for a fast-path "working"/"idle" read on
    * agent CLIs that self-report their status in the title. */
   lastTitle: string | null;
+  /** Minimal review gate (Phase 2, issue #178). "waiting" while a hook's
+   * `review_gate` message is blocked on a real decision (see
+   * Session.emitHookEvent/resolveGate below); "approved"/"denied" once
+   * resolved (via POST /api/sessions/:id/review-gate or the hooks.ts
+   * server-side timeout); "idle" if no gate has ever fired. In-memory only —
+   * resets to "idle" across a restart, same as attention/activity above; see
+   * the plan's "Persistence note" for why that's an accepted, explicit gap
+   * for this minimal slice. */
+  gateState: "idle" | "waiting" | "approved" | "denied";
+  /** The most recent `review_gate` prompt while gateState is "waiting", else
+   * null (cleared on resolution — see Session.resolveGate). */
+  gatePrompt: string | null;
 }
 
 type DataListener = (chunk: Buffer) => void;
@@ -359,6 +371,11 @@ export class Session {
   // IS this session's public attentionAt (see toInfo()), folded into the
   // machine's state so there's only ever one timestamp to keep in sync.
   private attentionState: AttentionMachineState = INITIAL_ATTENTION_STATE;
+  // Minimal review gate (Phase 2, issue #178) — see SessionInfo.gateState's
+  // doc comment for the state meanings. Set from emitHookEvent's
+  // "review_gate" case and from resolveGate() below; read by toInfo().
+  private gateState: "idle" | "waiting" | "approved" | "denied" = "idle";
+  private gatePrompt: string | null = null;
   // Last title-derived working/idle read (classifyActivityFromTitle), kept
   // ONLY to detect the #98 working->idle TRANSITION (a program that was
   // working just went idle — "ready for input") — distinct from `activity`
@@ -882,18 +899,54 @@ export class Session {
       case "file_change":
         this.emitEvent("file_change", { path: message.path, action: message.action });
         return;
-      case "review_gate":
-        this.emitEvent("review_gate", { state: message.state, prompt: message.prompt });
-        if (message.state === "waiting") {
-          this.emitAttentionSignalWithExtras("reviewGate", { prompt: message.prompt });
+      case "review_gate": {
+        // HookMessage's `UnknownHookMessage` fallback has a `kind: string`
+        // (not a literal) plus a `[key: string]: unknown` index signature,
+        // so TS can't discriminate `message` down to just
+        // ReviewGateHookMessage from `message.kind === "review_gate"`
+        // alone — reading `.state`/`.prompt` off the still-widened union
+        // resolves to `unknown`. Safe to assert narrow here: the protocol
+        // layer's validateReviewGate (hook-protocol.ts) only ever produces
+        // a real ReviewGateHookMessage for this kind, never
+        // UnknownHookMessage.
+        const gate = message as ReviewGateHookMessage;
+        this.gateState = gate.state;
+        this.gatePrompt = gate.state === "waiting" ? gate.prompt : null;
+        this.emitEvent("review_gate", { state: gate.state, prompt: gate.prompt });
+        if (gate.state === "waiting") {
+          this.emitAttentionSignalWithExtras("reviewGate", { prompt: gate.prompt });
         }
         return;
+      }
       case "fork":
       case "join":
         return;
       default:
         return;
     }
+  }
+
+  /**
+   * Resolves a pending review gate (issue #178) — called from
+   * PtyManager.resolveGate, itself called from hooks.ts once a real decision
+   * exists (either POST /api/sessions/:id/review-gate, or hooks.ts's own
+   * server-side gate timeout). Deliberately NOT driven by another incoming
+   * hook message: the forwarder that receives this decision prints it
+   * straight to the agent's stdout and exits — it never sends a follow-up
+   * `review_gate` line of its own — so this is the one place gateState
+   * transitions out of "waiting". Emits a `review_gate` event carrying the
+   * resolved state (and `reason` for a denial) so the event feed/timeline
+   * shows the outcome, not just the original prompt. Does not force-clear
+   * the attention state machine: the tool call this unblocks (or the
+   * agent's own denial handling) produces PTY output imminently either way,
+   * which already clears attention via the existing output-driven path —
+   * adding a second, gate-specific clear input to attention-detect.ts's
+   * state machine isn't worth it for this one call site.
+   */
+  resolveGate(decision: "approved" | "denied", reason?: string): void {
+    this.gateState = decision;
+    this.gatePrompt = null;
+    this.emitEvent("review_gate", { state: decision, ...(reason !== undefined ? { reason } : {}) });
   }
 
   /**
@@ -1155,6 +1208,8 @@ export class Session {
       attention: this.attentionState.confirmedAt !== null,
       attentionAt: this.attentionState.confirmedAt,
       lastTitle: this.lastTitle,
+      gateState: this.gateState,
+      gatePrompt: this.gatePrompt,
     };
   }
 }
@@ -1307,6 +1362,14 @@ export class PtyManager {
    * matters, not just consistency with markEventsSeen(). */
   emitHookEvent(id: string, message: HookMessage): void {
     this.sessions.get(id)?.emitHookEvent(message);
+  }
+
+  /** Issue #178 — see Session.resolveGate's doc comment. A no-op (never
+   * throws) if `id` isn't tracked, same "unknown id is quietly ignored"
+   * posture as emitHookEvent above (hooks.ts only ever calls this with an id
+   * resolveToken() itself returned, so in practice it's always tracked). */
+  resolveGate(id: string, decision: "approved" | "denied", reason?: string): void {
+    this.sessions.get(id)?.resolveGate(decision, reason);
   }
 
   /** Kill our tracked attach-client only (detach); the dtach master + program survive. */

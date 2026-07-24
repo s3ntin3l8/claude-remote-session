@@ -163,6 +163,23 @@ describe("RemoteHostClient", () => {
     await expect(client().terminate("1")).resolves.toBeUndefined();
   });
 
+  it("posts a review-gate decision to /internal/sessions/:id/review-gate and returns its ok flag (issue #178)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { ok: true }));
+    await expect(client().resolveReviewGate("1", "denied", "looks unsafe")).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://example.invalid:1234/internal/sessions/1/review-gate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ decision: "denied", reason: "looks unsafe" }),
+      }),
+    );
+  });
+
+  it("resolveReviewGate returns false when the agent reports nothing was pending", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { ok: false }));
+    await expect(client().resolveReviewGate("1", "approved")).resolves.toBe(false);
+  });
+
   it("bypasses fetch entirely for an empty ids array", async () => {
     await expect(client().bulkLiveStatus([], 1000)).resolves.toEqual({});
     await expect(client().bulkIsMasterAlive([])).resolves.toEqual({});

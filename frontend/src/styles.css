@@ -1925,6 +1925,61 @@ body {
   color: var(--fg);
 }
 
+/* Minimal review gate (issue #178) — Approve/Deny for a pending
+   review_gate row (see NotificationBell.tsx's GateActions). */
+.notif-gate-actions,
+.notif-gate-deny-form {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+}
+.notif-gate-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--fg) 20%, transparent);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font-family: inherit;
+}
+.notif-gate-btn:hover {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+.notif-gate-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.notif-gate-approve {
+  color: var(--g);
+  border-color: color-mix(in srgb, var(--g) 45%, transparent);
+}
+.notif-gate-approve:hover {
+  background: color-mix(in srgb, var(--g) 14%, transparent);
+}
+.notif-gate-deny,
+.notif-gate-deny-confirm {
+  color: var(--r);
+  border-color: color-mix(in srgb, var(--r) 45%, transparent);
+}
+.notif-gate-deny:hover,
+.notif-gate-deny-confirm:hover {
+  background: color-mix(in srgb, var(--r) 14%, transparent);
+}
+.notif-gate-deny-reason {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--fg) 20%, transparent);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+
 /* Shared KebabMenu trigger (group/workspace/project rows) — same box as
    .pane-tab-btn but not pane-specific; the dropdown itself reuses
    .pane-tab-overflow-* above rather than duplicating those rules. */

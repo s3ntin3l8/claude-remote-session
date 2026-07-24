@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { eventKey, useDashboardStore } from "./store.js";
 import { describeEvent, notifyKind } from "./eventDescriptions.js";
+import { api } from "./api.js";
 import type { NotificationEvent, Project, Session } from "./api.js";
 import { BellIcon, CheckIcon, CloseIcon } from "./icons.js";
 import { formatRelativeAge } from "./relativeTime.js";
@@ -336,6 +337,20 @@ function EventRow({
     onOpen(session);
   };
 
+  // Minimal review gate (issue #178) — gated on the SESSION's own live
+  // gateState, not just this event's own payload.state === "waiting": once
+  // resolved, the session's gateState moves on to "approved"/"denied" but
+  // the original "waiting" event row stays in the feed unchanged (each
+  // NotificationEvent is an immutable point-in-time record — resolution
+  // appends a NEW review_gate event rather than mutating this one). Keying
+  // off live state means Approve/Deny disappears from this row the instant
+  // the gate is actually resolved (by this click or a timeout elsewhere),
+  // rather than staying clickable against an already-answered gate.
+  const isPendingGate =
+    item.event.kind === "review_gate" &&
+    item.event.payload.state === "waiting" &&
+    session?.gateState === "waiting";
+
   return (
     <div
       className={`notif-event-row${item.read ? " read" : ""}`}
@@ -351,6 +366,7 @@ function EventRow({
       <span className="notif-event-body">
         <span className="notif-event-text">{text}</span>
         <span className="notif-event-time">{age}</span>
+        {isPendingGate && <GateActions sessionId={item.sessionId} />}
       </span>
       <span className="notif-event-actions">
         {!item.read && (
@@ -379,5 +395,107 @@ function EventRow({
         </button>
       </span>
     </div>
+  );
+}
+
+// Minimal review gate (issue #178) — Approve is a single click; Deny opens
+// an inline optional-reason field rather than firing immediately, since a
+// denial is the more consequential of the two and the reason is worth a
+// beat to type. Both call POST /api/sessions/:id/review-gate directly; no
+// optimistic local state is needed because the row's own visibility already
+// reacts live once the store's next poll/event picks up the session's
+// updated gateState (see EventRow's isPendingGate).
+function GateActions({ sessionId }: { sessionId: number }) {
+  const [denying, setDenying] = useState(false);
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const approve = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSubmitting(true);
+    try {
+      await api.resolveReviewGate(sessionId, "approved");
+    } catch {
+      // Best-effort: a failed request (network hiccup, or the gate already
+      // resolved/timed out elsewhere) just leaves the row as-is — the next
+      // store refresh reflects whatever the real gateState actually is.
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const deny = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSubmitting(true);
+    try {
+      await api.resolveReviewGate(sessionId, "denied", reason.trim() || undefined);
+    } catch {
+      // See approve()'s catch above.
+    } finally {
+      setSubmitting(false);
+      setDenying(false);
+    }
+  };
+
+  if (denying) {
+    return (
+      <span
+        className="notif-gate-deny-form"
+        onClick={(e) => e.stopPropagation()}
+        // The row this renders inside (EventRow) treats a Space/Enter
+        // keydown as "open this session" (its own keyboard-activation
+        // handler, mirroring its role="button"/tabIndex=0) — without this,
+        // typing a space into the reason field below bubbles up and closes
+        // the whole notifications panel mid-keystroke.
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        <input
+          className="notif-gate-deny-reason"
+          placeholder="Reason (optional)"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          autoFocus
+        />
+        <button
+          className="notif-gate-btn notif-gate-deny-confirm"
+          disabled={submitting}
+          onClick={deny}
+        >
+          Deny
+        </button>
+        <button
+          className="notif-gate-btn"
+          disabled={submitting}
+          onClick={(e) => {
+            e.stopPropagation();
+            setDenying(false);
+          }}
+        >
+          Cancel
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="notif-gate-actions"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      <button className="notif-gate-btn notif-gate-approve" disabled={submitting} onClick={approve}>
+        Approve
+      </button>
+      <button
+        className="notif-gate-btn notif-gate-deny"
+        disabled={submitting}
+        onClick={(e) => {
+          e.stopPropagation();
+          setDenying(true);
+        }}
+      >
+        Deny
+      </button>
+    </span>
   );
 }

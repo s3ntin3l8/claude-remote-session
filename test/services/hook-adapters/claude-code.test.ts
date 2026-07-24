@@ -45,8 +45,13 @@ describe("claudeCodeAdapter.matches (issue #174)", () => {
 describe("buildClaudeHookSettings (issue #174)", () => {
   const settings = buildClaudeHookSettings("/abs/path/forwarder.mjs", "/abs/path/node");
 
-  it("registers Notification, Stop, and PostToolUse only — never PreToolUse", () => {
-    expect(Object.keys(settings.hooks).sort()).toEqual(["Notification", "PostToolUse", "Stop"]);
+  it("registers Notification, Stop, PostToolUse, and PreToolUse (issue #178)", () => {
+    expect(Object.keys(settings.hooks).sort()).toEqual([
+      "Notification",
+      "PostToolUse",
+      "PreToolUse",
+      "Stop",
+    ]);
   });
 
   it("each hook command invokes the node binary and forwarder with the claude-code agent tag", () => {
@@ -58,6 +63,14 @@ describe("buildClaudeHookSettings (issue #174)", () => {
 
   it("restricts PostToolUse to the file-editing tools via matcher", () => {
     expect(settings.hooks.PostToolUse[0].matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
+  });
+
+  it("restricts PreToolUse (the review gate) to Bash only, with a much longer timeout than the fire-and-forget hooks (issue #178)", () => {
+    expect(settings.hooks.PreToolUse[0].matcher).toBe("Bash");
+    expect(settings.hooks.PreToolUse[0].hooks[0].timeout).toBe(300);
+    expect(settings.hooks.Notification[0].hooks[0].timeout).toBe(10);
+    const command = settings.hooks.PreToolUse[0].hooks[0].command;
+    expect(command).toContain("claude-code PreToolUse");
   });
 
   it("defaults the node binary to process.execPath when not overridden", () => {
