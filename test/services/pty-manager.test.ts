@@ -771,7 +771,7 @@ describe("PtyManager", () => {
   it("an earlier nudge cycle's cancelled grace-reset can't clear suppression for a still-in-flight later cycle", async () => {
     // Regression test for the core cross-cycle race (issue #107): the OLD
     // code's three bare setTimeouts per cycle meant a first cycle's
-    // grace-reset (suppressScrollback = false) could fire while a SECOND,
+    // grace-reset (suppressSynthesizedOutput = false) could fire while a SECOND,
     // later cycle's own dip/restore repaint was still genuinely in flight —
     // letting that second cycle's own reduced-height dip frame leak into
     // scrollback and get replayed to a future attach. cancelPendingNudge()
@@ -1418,6 +1418,44 @@ describe("PtyManager", () => {
         vi.useRealTimers();
       }
       expect(session.toInfo().attention).toBe(false);
+    });
+
+    it("does eventually fire the fallback sustained-silence signal for a hook-active session after HOOK_FALLBACK_SILENCE_MS (dead/wedged hook pipeline safety net)", async () => {
+      // Same "claude" hooksActive session as the splash-render test above,
+      // but silent for much longer than any legitimate startup render could
+      // ever take — this must still surface attention eventually, covering
+      // a killed agent process or crashed forwarder that never sends its
+      // Stop/"done" hook message at all.
+      const session = manager.getOrCreate({
+        id: "1",
+        cwd: "/tmp",
+        command: "claude",
+        cols: 80,
+        rows: 24,
+      });
+      await waitForSpawn(session);
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const start = Date.now();
+        vi.setSystemTime(start);
+        fakePtyChildren[0].emitData("work output 1");
+
+        vi.setSystemTime(start + 1_200); // past SUSTAIN_MS -- a genuine streak
+        fakePtyChildren[0].emitData("work output 2");
+        expect(session.toInfo().attention).toBe(false); // not silent long enough yet
+
+        // Still well short of HOOK_FALLBACK_SILENCE_MS -- must not fire yet.
+        session.tick(start + 1_200 + 10_000);
+        expect(session.toInfo().attention).toBe(false);
+
+        // Past HOOK_FALLBACK_SILENCE_MS with no hook signal ever arriving --
+        // the fallback watchdog must now fire.
+        session.tick(start + 1_200 + 60_000);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(session.toInfo().attention).toBe(true);
     });
 
     it("tracks the most recent OSC 0/2 title-change payload", async () => {
