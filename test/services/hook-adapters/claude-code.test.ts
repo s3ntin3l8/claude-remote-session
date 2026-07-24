@@ -68,6 +68,19 @@ describe("buildClaudeHookSettings (issue #174)", () => {
     );
   });
 
+  it("omits PreToolUse when includeReviewGate is explicitly false, not just when omitted", () => {
+    const explicitlyOffSettings = buildClaudeHookSettings(
+      "/abs/path/forwarder.mjs",
+      "/abs/path/node",
+      false,
+    );
+    expect(Object.keys(explicitlyOffSettings.hooks).sort()).toEqual([
+      "Notification",
+      "PostToolUse",
+      "Stop",
+    ]);
+  });
+
   describe("with includeReviewGate: true (issue #178, MULLION_REVIEW_GATE_ENABLED=true)", () => {
     const gatedSettings = buildClaudeHookSettings(
       "/abs/path/forwarder.mjs",
